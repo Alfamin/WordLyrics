@@ -1,0 +1,283 @@
+"""WordLyrics command line.
+
+  WordLyrics                      asks for the music folder, then runs
+  WordLyrics "D:\\Music"           run on that folder
+  WordLyrics "D:\\Music" --dry-run only look and say what would be done
+  WordLyrics undo "D:\\Music"      take out again what the tool wrote
+  WordLyrics check                is everything installed, and how fast is this computer
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import time
+
+from . import __version__
+
+HOME = os.environ.get("WORDLYRICS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def keep_awake(on):
+    """Windows: do not let the computer go to sleep in the middle of a long run (the screen may still turn off)."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000001 if on else 0x80000000)
+        except Exception:
+            pass
+
+
+_only_one = []
+
+
+def already_running():
+    """Only one run at a time on a computer: two would fight over the graphics card's memory.
+    The mark disappears by itself when the program ends, however it ends."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = ctypes.c_void_p
+        handle = k32.CreateMutexW(None, False, "WordLyrics-one-run-at-a-time")
+        if handle and ctypes.get_last_error() == 183:        # ERROR_ALREADY_EXISTS
+            return True
+        _only_one.append(handle)                             # kept until the program ends
+    except Exception:
+        pass
+    return False
+
+
+def ask(prompt):
+    try:
+        return input(prompt).strip().strip('"').strip()
+    except EOFError:
+        return ""
+
+
+def parser():
+    ap = argparse.ArgumentParser(prog="WordLyrics", description="Word-by-word timed lyrics for a local music folder.")
+    ap.add_argument("folder", nargs="?", help="the music folder (subfolders are included)")
+    ap.add_argument("--backup-to", metavar="FOLDER", help="where the backup copy goes (default: the drive with the most free space)")
+    ap.add_argument("--yes", action="store_true", help="do not ask anything, use the defaults")
+    ap.add_argument("--dry-run", action="store_true", help="only look at the folder and say what would be done; nothing is copied or written")
+    ap.add_argument("--offline", action="store_true", help="do not look for lyrics online; only use lyrics that are already there")
+    ap.add_argument("--speed", choices=["full", "half", "light"], default=None,
+                    help="how much of this computer's power to use: full (best when you are away), half, or light "
+                         "(about a quarter, for while you use the computer). Can be changed with the keys 1, 2, 3 during the run")
+    ap.add_argument("--no-lrc", action="store_true", help="write only .elrc files, never an extra line-timed .lrc")
+    ap.add_argument("--quick-backup", action="store_true", help="backup without reading every copied file back (faster, less thorough)")
+    ap.add_argument("--retry", action="store_true", help="try again the songs an earlier run could not time (normally skipped while nothing about them changed)")
+    ap.add_argument("--only", action="append", default=[], metavar="TEXT", help="only songs whose path contains this text (may be repeated)")
+    ap.add_argument("--limit", type=int, default=0, metavar="N", help="only the first N songs (for a trial)")
+    ap.add_argument("--no-open", action="store_true", help="do not open the report when done")
+    ap.add_argument("--plain-output", action="store_true", help="simple progress lines instead of the live screen")
+    ap.add_argument("--version", action="version", version="WordLyrics " + __version__)
+    return ap
+
+
+def dry_run(source, opts):
+    from concurrent.futures import ThreadPoolExecutor
+    from . import backup
+    from . import library as L
+    from .ui import size
+    print("Looking at %s (nothing is copied or written) ..." % source, flush=True)
+    files, links = L.walk(source, [HOME])
+    audio = [f for f in files if os.path.splitext(f[0])[1].lower() in L.AUDIO_EXT]
+    if opts.only:
+        audio = [f for f in audio if any(x.lower() in f[1].lower() for x in opts.only)]
+    if opts.limit:
+        audio = audio[: opts.limit]
+
+    def one(f):
+        try:
+            return L.read_song(f[0], f[1], f[2])
+        except Exception as e:
+            s = L.Song(path=f[0], rel=f[1], size=f[2])
+            s.skip = "could not be read (%s)" % type(e).__name__
+            return s
+    with ThreadPoolExecutor(4) as ex:
+        songs = list(ex.map(one, audio))
+    L.group_same_name(songs)
+    go = [s for s in songs if not s.skip]
+    n = lambda t: sum(1 for s in go if s.tier == t)
+    place = opts.backup_to or backup.default_place(source)
+    total = sum(f[2] for f in files)
+    print()
+    print("  %5d songs (%s in %d files)" % (len(songs), size(total), len(files)))
+    print("  %5d would be left alone:" % (len(songs) - len(go)))
+    reasons = {}
+    for s in songs:
+        if s.skip:
+            reasons[s.skip.split(" (")[0]] = reasons.get(s.skip.split(" (")[0], 0) + 1
+    for r, c in sorted(reasons.items(), key=lambda x: -x[1]):
+        print("           %5d  %s" % (c, r))
+    print("  %5d have line-timed lyrics: their words would be timed" % n(L.LINE))
+    print("  %5d have plain lyrics: line-timed lyrics would be looked up online, else the plain ones are timed" % n(L.PLAIN))
+    print("  %5d have no lyrics: lyrics would be looked up online%s" % (n(L.NONE) + n(L.INSTRUMENTAL), " (switched off by --offline)" if opts.offline else ""))
+    hours = sum(s.seconds for s in go) / 3600
+    print()
+    print("  Music to listen to: %.1f hours. Backup copy would go to %s (%s needed)." % (hours, place, size(total)))
+    return 0
+
+
+def do_undo(args):
+    from . import undo
+    ap = argparse.ArgumentParser(prog="WordLyrics undo")
+    ap.add_argument("folder")
+    ap.add_argument("--yes", action="store_true")
+    a = ap.parse_args(args)
+    source = os.path.abspath(a.folder)
+    lib_home, move, keep = undo.plan(HOME, source)
+    if not move and not keep:
+        print("Nothing to undo: this tool has no record of writing files into %s" % source)
+        return 0
+    print("%d lyric files written by this tool would be moved out of %s" % (len(move), source))
+    if keep:
+        print("%d would be left alone (changed since they were written, or already gone)" % len(keep))
+    if not move:
+        return 0
+    if not a.yes and ask("Type yes to move them: ").lower() != "yes":
+        print("Nothing was moved.")
+        return 0
+    dest, done = undo.apply(lib_home, move)
+    print("%d files moved to %s" % (done, dest))
+    return 0
+
+
+def do_check():
+    from . import models
+    print("WordLyrics %s   folder: %s   Python %s" % (__version__, HOME, sys.version.split()[0]))
+    ok = True
+    for mod in ("numpy", "av", "onnxruntime", "mutagen", "unidecode"):
+        try:
+            m = __import__(mod)
+            print("  ok       %s %s" % (mod, getattr(m, "__version__", getattr(m, "version_string", ""))))
+        except Exception as e:
+            ok = False
+            print("  MISSING  %s (%s)" % (mod, e))
+    folder = os.path.join(HOME, "models")
+    need = models.missing(folder)
+    for m in models.MODELS:
+        print("  %s  model %s" % ("to get  " if m in need else "ok      ", m["file"]))
+    if ok and not need:
+        from .engine import ALIGNER, SEPARATOR, Engine
+        eng = Engine(folder, "auto", None, lambda msg: print("  " + msg, flush=True))
+        print("  runs on: %s" % eng.describe())
+        for m in (ALIGNER, SEPARATOR):
+            sp = eng.speed.get(m) or {}
+            print("    %-18s one call: graphics card %s, processor %s" % (
+                m, "%.2f s" % sp["gpu"] if sp.get("gpu") else "not usable", "%.2f s" % sp["cpu"] if sp.get("cpu") else "-"))
+    return 0 if ok else 1
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")       # song names in any script must never stop a run
+        except Exception:
+            pass
+    if argv[:1] == ["undo"]:
+        return do_undo(argv[1:])
+    if argv[:1] == ["check"]:
+        return do_check()
+    if argv[:1] == ["run"]:
+        argv = argv[1:]
+    opts = parser().parse_args(argv)
+    interactive = sys.stdin.isatty() and sys.stdout.isatty() and not opts.yes
+    wizard = not opts.folder
+    if wizard:
+        if not interactive:
+            parser().print_help()
+            return 2
+        print("\n WordLyrics %s - word-by-word lyrics for your music\n" % __version__)
+        print(" Your songs are only read. A full backup copy of the folder is made first,")
+        print(" and the only thing added to it are new lyric files next to the songs.\n")
+        opts.folder = ask(" Music folder (type the path or drag the folder here), then Enter:\n > ")
+    source = os.path.abspath(os.path.expanduser(opts.folder or ""))
+    if not opts.folder or not os.path.isdir(source):
+        print("That is not a folder: %s" % (opts.folder or "(nothing given)"))
+        return 2
+    if opts.dry_run:
+        return dry_run(source, opts)
+    if already_running():
+        print("WordLyrics is already running on this computer (in another window). Only one run at a time:")
+        print("two would fight over the graphics card. Wait for the other one, or stop it with Ctrl+C.")
+        return 3
+    from . import backup
+    if not opts.backup_to and interactive:
+        place = backup.default_place(source)
+        try:
+            import shutil
+            free = shutil.disk_usage(os.path.splitdrive(place)[0] + os.sep if os.name == "nt" else os.path.expanduser("~")).free
+            extra = " (%.0f GB free there)" % (free / 1e9)
+        except OSError:
+            extra = ""
+        print("\n The backup copy will go to: %s%s" % (place, extra))
+        other = ask(" Press Enter to accept, or type another folder:\n > ")
+        if other:
+            opts.backup_to = os.path.abspath(os.path.expanduser(other))
+        print()
+    if not opts.speed and interactive:
+        print(" How hard should the computer work? (a share of what THIS computer can do)")
+        print("   1  Full speed   - fastest; best when you are away or asleep")
+        print("   2  Half speed   - the computer stays comfortable to use")
+        print("   3  Light        - about a quarter; for gaming or other heavy use meanwhile")
+        print(" You can switch at any time during the run with the keys 1, 2, 3 (and P to pause).")
+        pick = ask(" Press Enter for full speed, or type 2 or 3:\n > ")
+        opts.speed = {"2": "half", "3": "light", "۲": "half", "۳": "light", "٢": "half", "٣": "light"}.get(pick[:1], "full")
+        print()
+    opts.speed = opts.speed or "full"
+    if opts.backup_to and backup.inside(opts.backup_to, source):
+        print("The backup cannot be inside the music folder itself. Choose another place with --backup-to.")
+        return 2
+
+    from . import report
+    from .pipeline import Run, Stop
+    run = Run(source, opts, HOME)
+    keep_awake(True)
+    code = 0
+    try:
+        run.run()
+    except KeyboardInterrupt:
+        run.stop.set()
+        run.interrupted = True
+        code = 130
+        print("\nStopped.")
+    except Stop as e:
+        code = 1
+        print("\n" + (str(e) or "Stopped."))
+    except backup.BackupError as e:
+        code = 1
+        print("\nThe backup could not be completed, so nothing else was done: %s" % e)
+        print("Nothing was written to your music folder.")
+    except Exception as e:
+        code = 1
+        run.problems.append("the run ended with an error: %s: %s" % (type(e).__name__, e))
+        print("\nThe run ended with an error: %s: %s" % (type(e).__name__, e))
+    finally:
+        keep_awake(False)
+    if run.songs:
+        try:
+            path = report.write(run)
+            print()
+            for ln in report.summary_lines(run):
+                print(" " + ln)
+            print("\n Full report: %s" % path)
+            if not opts.no_open and interactive and os.name == "nt":
+                try:
+                    os.startfile(path)                   # opens the report in the browser
+                except OSError:
+                    pass
+        except Exception as e:
+            print("The report could not be written: %s" % e)
+    if run.interrupted and code == 0:
+        code = 130
+    return code
+
+
+if __name__ == "__main__":
+    t0 = time.time()
+    sys.exit(main())

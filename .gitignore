@@ -1,0 +1,6 @@
+.python/
+.python-setup/
+models/
+runs/
+__pycache__/
+speed test.json

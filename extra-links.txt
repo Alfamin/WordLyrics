@@ -1,0 +1,18 @@
+# WordLyrics: extra download addresses (optional).
+#
+# WordLyrics downloads its parts from the normal places first and has backup servers built in.
+# If none of them can be reached from where you are, add an address here that does work.
+# Addresses in this file are tried first. A file is only used if its fingerprint matches,
+# so a wrong or tampered file from any server is refused.
+#
+# One address per line, without the "#":
+#
+#   packages <address of a Python package index>
+#   mms_fa_300m.onnx <address of that model file>
+#   Kim_Vocal_2.onnx <address of that model file>
+#
+# Examples:
+#   packages https://mirror-pypi.runflare.com/simple
+#   mms_fa_300m.onnx https://example.org/files/mms_fa_300m.onnx
+#
+# You can also put the two model files into the "models" folder by hand; then nothing is downloaded.
