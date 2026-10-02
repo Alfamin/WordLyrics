@@ -11,6 +11,10 @@
 #   $env:WORDLYRICS_DIR      = 'D:\Tools\WordLyrics'    another folder to install into
 #   $env:WORDLYRICS_NO_START = '1'                      install only, do not start
 #   $env:WORDLYRICS_SHORTCUT_DIR = 'D:\Tools'           put the shortcut there instead of on the desktop
+#   $env:WORDLYRICS_NO_NOCTIS = '1'                     do not put the plugin into the Noctis player
+#
+# If the Noctis music player is on this computer, its WordLyrics plugin is put into Noctis' plugins
+# folder as well. Noctis keeps it switched off until you switch it on in Settings -> Plugins.
 
 & {
     $ErrorActionPreference = 'Stop'
@@ -74,6 +78,34 @@
         if (Test-Path -LiteralPath $plugin) {
             New-Item -ItemType Directory -Force -Path (Join-Path $Dest 'noctis-plugin') | Out-Null
             Copy-Item -LiteralPath $plugin -Destination (Join-Path $Dest 'noctis-plugin\WordLyrics-for-Noctis.zip') -Force
+            # ... and, when Noctis is on this computer, put into its plugins folder. Noctis keeps a new
+            # plugin switched off until you switch it on yourself; nothing in Noctis' settings is touched.
+            $noctis = $env:NOCTIS_DATA_DIR
+            if (-not $noctis) { $noctis = Join-Path $env:APPDATA 'Noctis' }
+            if (-not $env:WORDLYRICS_NO_NOCTIS -and (Test-Path -LiteralPath $noctis -PathType Container)) {
+                try {
+                    $unpacked = Join-Path $Work 'plugin'
+                    Expand-Archive -LiteralPath $plugin -DestinationPath $unpacked -Force
+                    if (-not (Test-Path -LiteralPath (Join-Path $unpacked 'plugin.json'))) { throw 'the plugin package is not complete' }
+                    $id = (Get-Content -LiteralPath (Join-Path $unpacked 'plugin.json') -Raw | ConvertFrom-Json).id
+                    if ($id -notmatch '^[a-z0-9._-]+$') { throw 'the plugin package is not complete' }
+                    $pluginHome = Join-Path (Join-Path $noctis 'plugins') $id
+                    $wasThere = Test-Path -LiteralPath (Join-Path $pluginHome 'plugin.json')
+                    New-Item -ItemType Directory -Force -Path $pluginHome | Out-Null
+                    Get-ChildItem -LiteralPath $unpacked -File | ForEach-Object {
+                        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $pluginHome $_.Name) -Force
+                    }
+                    if ($wasThere) {
+                        $NoctisNote = ' The Noctis plugin was updated too. It is used from the next start of Noctis.'
+                    } else {
+                        $NoctisNote = ' The Noctis plugin is in place. In Noctis: Settings -> Plugins, turn on "Community plugins",' +
+                                      "`n" + ' then switch "WordLyrics" on (restart Noctis first if it is not in the list yet).'
+                    }
+                } catch {
+                    $NoctisNote = ' (The Noctis plugin could not be put into Noctis: ' + $_.Exception.Message + '. Use "Install from file" in' +
+                                  "`n" + '  Noctis -> Settings -> Plugins with noctis-plugin\WordLyrics-for-Noctis.zip in the folder above.)'
+                }
+            }
         }
         # a file you may have edited is never replaced
         $extra = Join-Path $Dest 'extra-links.txt'
@@ -115,6 +147,7 @@
     }
 
     Write-Host " Installed. To remove it later, delete the folder $Dest and the shortcut."
+    if ($NoctisNote) { Write-Host $NoctisNote }
     Write-Host ''
     if (-not $env:WORDLYRICS_NO_START) {
         $env:WORDLYRICS_NO_PAUSE = '1'

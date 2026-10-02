@@ -60,12 +60,21 @@ library folders. When a song appears there (downloaded, copied, ripped, however 
 waits until the file has been left alone for 20 seconds, then has WordLyrics time that one song in the
 background, without a window. A notice in Noctis says when it is done. A song takes a few seconds.
 
-1. In Noctis: Settings → Plugins → turn on **Community plugins** → **Install from file…** → pick
-   `noctis-plugin\WordLyrics-for-Noctis.zip` in the WordLyrics folder
-   (or [download it](https://github.com/Alfamin/WordLyrics/raw/main/noctis-plugin/WordLyrics-for-Noctis.zip)).
-2. Switch the plugin on and approve what it asks for (a track menu entry, notices, internet).
-3. If WordLyrics itself is not on the computer yet, flip **Install or update WordLyrics** in the plugin's
-   settings: a window opens, installs it and fetches the models.
+If Noctis is on the computer when you install WordLyrics with the one line above, the plugin is put into
+Noctis by the installer. All that is left is to switch it on:
+
+1. In Noctis: Settings → Plugins → turn on **Community plugins**, then switch **WordLyrics** on and
+   approve what it asks for (a track menu entry, notices, internet). If it is not in the list yet,
+   restart Noctis or press the reload button there.
+
+Noctis keeps every new plugin switched off until you do this; the installer does not touch Noctis'
+settings.
+
+The other way round (the plugin first): in Noctis choose **Install from file…** with
+`noctis-plugin\WordLyrics-for-Noctis.zip` from the WordLyrics folder
+(or [download it](https://github.com/Alfamin/WordLyrics/raw/main/noctis-plugin/WordLyrics-for-Noctis.zip)),
+switch it on, then flip **Install or update WordLyrics** in the plugin's settings: a window opens,
+installs WordLyrics and fetches the models.
 
 What else it does:
 
