@@ -8,6 +8,8 @@
     second backup of a large library takes seconds and almost no extra space.
   * The copy is only called complete when every file is there; an interrupted copy keeps the ending
     ".incomplete" and is continued next time.
+  * A run that was asked to handle only certain songs copies only those songs and the files next to
+    them (a "part" backup, a folder of its own that says so in its name). Full backups never build on it.
 """
 from __future__ import annotations
 
@@ -114,9 +116,10 @@ def _notes(place, source):
     return out
 
 
-def make(source, place, files, links=(), progress=None, verify=True, stop=None):
+def make(source, place, files, links=(), progress=None, verify=True, stop=None, part=False):
     """files: [(path, rel, size, mtime_ns)] from library.walk. -> record of the backup; record['files'] is
-    {rel: [size, mtime_ns]} exactly as copied. progress(done_bytes, total_bytes, rel) is called as it goes."""
+    {rel: [size, mtime_ns]} exactly as copied. progress(done_bytes, total_bytes, rel) is called as it goes.
+    part: `files` is not the whole folder but a few songs (library.walk_songs)."""
     source, place = os.path.abspath(source), os.path.abspath(place)
     if inside(place, source):
         raise BackupError("the backup cannot be inside the music folder itself (%s); choose another place with --backup-to" % place)
@@ -125,10 +128,10 @@ def make(source, place, files, links=(), progress=None, verify=True, stop=None):
     except OSError as e:
         raise BackupError("the backup folder %s cannot be created (%s); choose another place with --backup-to" % (place, e.strerror or e))
     notes = _notes(place, source)
-    done_ones = [r for _, r in notes if r.get("complete")]
+    done_ones = [r for _, r in notes if r.get("complete") and not r.get("part")]
     prev_dir = os.path.join(place, done_ones[-1]["folder"]) if done_ones else None
     prev_files = done_ones[-1].get("files", {}) if done_ones else {}
-    unfinished = [(p, r) for p, r in notes if not r.get("complete")]
+    unfinished = [(p, r) for p, r in notes if not r.get("complete") and bool(r.get("part")) == part]
     if unfinished:      # an interrupted copy is continued, unless it holds files the music folder no longer has
         now = {f[1] for f in files} | {f[1] + ".wlpart" for f in files}
         old = os.path.join(place, unfinished[-1][1]["folder"])
@@ -139,11 +142,12 @@ def make(source, place, files, links=(), progress=None, verify=True, stop=None):
         target = os.path.join(place, rec0["folder"])
     else:
         name = os.path.basename(source.rstrip("\\/")) or "music"
-        target = os.path.join(place, "%s %s.incomplete" % (name, datetime.now().strftime("%Y-%m-%d %H.%M.%S")))
+        only = " (single songs)" if part else ""
+        target = os.path.join(place, "%s %s%s.incomplete" % (name, datetime.now().strftime("%Y-%m-%d %H.%M.%S"), only))
         os.makedirs(target)
         note_path = target + NOTE
         with open(note_path, "w", encoding="utf-8") as fh:
-            json.dump({"source": source, "folder": os.path.basename(target), "complete": False}, fh)
+            json.dump({"source": source, "folder": os.path.basename(target), "complete": False, "part": part}, fh)
     total = sum(f[2] for f in files)
     todo = []
     for path, rel, size, mtime in files:
@@ -158,7 +162,7 @@ def make(source, place, files, links=(), progress=None, verify=True, stop=None):
     free = shutil.disk_usage(place).free
     if need + MARGIN > free:
         raise BackupError("not enough room for the backup in %s (%.1f GB needed, %.1f GB free)" % (place, need / 1e9, free / 1e9))
-    for dirpath, dirnames, _ in os.walk(source):                # the folder structure, empty folders included
+    for dirpath, dirnames, _ in os.walk(source) if not part else ():    # the folder structure, empty folders included
         dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
         os.makedirs(_long(os.path.join(target, os.path.relpath(dirpath, source))), exist_ok=True)
     copied_as = {rel: [size, mtime] for _, rel, size, mtime in files}
@@ -173,6 +177,8 @@ def make(source, place, files, links=(), progress=None, verify=True, stop=None):
             progress(done, total, rel)
         dst = os.path.join(target, rel)
         made = False
+        if part:
+            os.makedirs(_long(os.path.dirname(dst)), exist_ok=True)
         if prev_dir and prev_files.get(rel) == [size, mtime]:
             try:
                 old = os.path.join(prev_dir, rel)
@@ -213,7 +219,7 @@ def make(source, place, files, links=(), progress=None, verify=True, stop=None):
     os.replace(target, final)                                   # only now is it called complete
     os.replace(note_path, final + NOTE)
     rec = {"source": source, "folder": os.path.basename(final), "made": datetime.now().isoformat(timespec="seconds"),
-           "complete": True, "files_total": len(copied_as), "bytes_total": sum(v[0] for v in copied_as.values()),
+           "complete": True, "part": part, "files_total": len(copied_as), "bytes_total": sum(v[0] for v in copied_as.values()),
            "copied": copied, "copied_bytes": copied_bytes, "linked_to_previous_backup": linked,
            "verified_byte_for_byte": bool(verify), "seconds": round(time.time() - t0, 1),
            "links_not_followed": list(links), "vanished_during_copy": vanished, "files": copied_as}

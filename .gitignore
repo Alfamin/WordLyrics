@@ -4,3 +4,4 @@ models/
 runs/
 __pycache__/
 speed test.json
+noctis-plugin/build/

@@ -3,8 +3,10 @@
   WordLyrics                      asks for the music folder, then runs
   WordLyrics "D:\\Music"           run on that folder
   WordLyrics "D:\\Music" --dry-run only look and say what would be done
+  WordLyrics "D:\\Music\\song.flac" only that song (several songs may be given)
   WordLyrics undo "D:\\Music"      take out again what the tool wrote
   WordLyrics check                is everything installed, and how fast is this computer
+  WordLyrics setup                fetch the models now instead of at the first run, then check
 """
 from __future__ import annotations
 
@@ -58,7 +60,10 @@ def ask(prompt):
 
 def parser():
     ap = argparse.ArgumentParser(prog="WordLyrics", description="Word-by-word timed lyrics for a local music folder.")
-    ap.add_argument("folder", nargs="?", help="the music folder (subfolders are included)")
+    ap.add_argument("folder", nargs="*", help="the music folder (subfolders are included), or one or more song files")
+    ap.add_argument("--songs-from", metavar="FILE", help="handle only the songs listed in this text file (one path per line, inside "
+                                                           "the music folder); only they and their lyric files go into the backup copy")
+    ap.add_argument("--result", metavar="FILE", help="also write what happened to each song into this file (JSON), for other programs")
     ap.add_argument("--backup-to", metavar="FOLDER", help="where the backup copy goes (default: the drive with the most free space)")
     ap.add_argument("--yes", action="store_true", help="do not ask anything, use the defaults")
     ap.add_argument("--dry-run", action="store_true", help="only look at the folder and say what would be done; nothing is copied or written")
@@ -83,8 +88,8 @@ def dry_run(source, opts):
     from . import library as L
     from .ui import size
     print("Looking at %s (nothing is copied or written) ..." % source, flush=True)
-    files, links = L.walk(source, [HOME])
-    audio = [f for f in files if os.path.splitext(f[0])[1].lower() in L.AUDIO_EXT]
+    files, links = L.walk(source, [HOME]) if opts.songs is None else (L.walk_songs(source, opts.songs, [HOME])[0], [])
+    audio =[f for f in files if os.path.splitext(f[0])[1].lower() in L.AUDIO_EXT]
     if opts.only:
         audio = [f for f in audio if any(x.lower() in f[1].lower() for x in opts.only)]
     if opts.limit:
@@ -146,7 +151,7 @@ def do_undo(args):
     return 0
 
 
-def do_check():
+def do_check(remember=None):
     from . import models
     print("WordLyrics %s   folder: %s   Python %s" % (__version__, HOME, sys.version.split()[0]))
     ok = True
@@ -163,13 +168,87 @@ def do_check():
         print("  %s  model %s" % ("to get  " if m in need else "ok      ", m["file"]))
     if ok and not need:
         from .engine import ALIGNER, SEPARATOR, Engine
-        eng = Engine(folder, "auto", None, lambda msg: print("  " + msg, flush=True))
+        eng = Engine(folder, "auto", remember, lambda msg: print("  " + msg, flush=True))
         print("  runs on: %s" % eng.describe())
         for m in (ALIGNER, SEPARATOR):
             sp = eng.speed.get(m) or {}
             print("    %-18s one call: graphics card %s, processor %s" % (
                 m, "%.2f s" % sp["gpu"] if sp.get("gpu") else "not usable", "%.2f s" % sp["cpu"] if sp.get("cpu") else "-"))
     return 0 if ok else 1
+
+
+def do_setup():
+    """Fetch the models now (they are otherwise fetched at the first run), then check that everything works."""
+    import shutil
+    from . import models
+    from .ui import size
+    folder = os.path.join(HOME, "models")
+    need = models.missing(folder)
+    if need and already_running():
+        print("WordLyrics is already running on this computer (in another window). It fetches the models itself.")
+        return 3
+    os.makedirs(folder, exist_ok=True)
+    total = sum(m["size"] for m in need)
+    have = sum(os.path.getsize(os.path.join(folder, m["file"] + ".download")) for m in need
+               if os.path.exists(os.path.join(folder, m["file"] + ".download")))
+    if need and shutil.disk_usage(folder).free < total - have + 200 * 1024 * 1024:
+        print("Not enough free space for the models: %s needed in %s." % (size(total - have), folder))
+        return 1
+    for m in need:
+        print("\n Fetching %s (%s, %s)" % (m["file"], m["what"], size(m["size"])), flush=True)
+        shown = [-1]
+
+        def progress(done, whole):
+            pct = int(100 * done / whole)
+            if pct != shown[0]:
+                shown[0] = pct
+                print("\r   %3d %%   %s of %s   " % (pct, size(done), size(whole)), end="", flush=True)
+        try:
+            models.download(m, folder, progress, note=lambda text: print("\n   " + text, flush=True))
+        except models.ModelError as e:
+            print("\n The models could not be downloaded: %s" % e)
+            return 1
+        except KeyboardInterrupt:
+            print("\n Stopped. Start again to continue where it stopped.")
+            return 130
+        print()
+    print()
+    return do_check(os.path.join(HOME, "speed test.json"))        # measured once here, so the first run need not
+
+
+def songs_only(opts):
+    """Was the tool pointed at songs instead of at a folder? -> (music folder, [song paths]) or (None, None).
+    Songs can be named one by one (dragged onto the program) or in a list file (--songs-from)."""
+    given = [os.path.abspath(os.path.expanduser(p)) for p in opts.folder]
+    if opts.songs_from:
+        from .library import read_list
+        if len(given) != 1 or not os.path.isdir(given[0]):
+            return None, "--songs-from needs the music folder those songs are in."
+        if not os.path.isfile(opts.songs_from):
+            return None, "The list of songs is not there: %s" % opts.songs_from
+        return given[0], read_list(opts.songs_from)
+    if given and all(os.path.isfile(p) for p in given):
+        try:
+            return os.path.commonpath([os.path.dirname(p) for p in given]), given
+        except ValueError:
+            return None, "The songs are on different drives. Give the songs of one drive at a time."
+    return None, None
+
+
+def write_result(path, run, code, error=""):
+    """What happened, for a program that started this one (the Noctis plugin reads it)."""
+    import json
+    songs = [{"path": s.path, "song": s.rel, "artist": s.artist, "title": s.title, "status": s.result.get("status", "not_reached"),
+              "reason": s.result.get("reason", ""), "files": s.result.get("files", [])} for s in (run.songs if run else [])]
+    out = {"wordlyrics": __version__, "exit_code": code, "error": error, "music_folder": run.source if run else "",
+           "run_folder": run.run_dir if run else "", "left_out": [{"path": p, "reason": w} for p, w in (run.not_usable if run else [])],
+           "notes": list(run.problems) if run else [], "songs": songs}
+    try:
+        with open(path + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump(out, fh, ensure_ascii=False, indent=1)
+        os.replace(path + ".tmp", path)
+    except OSError as e:
+        print("The result file could not be written: %s" % e)
 
 
 def main(argv=None):
@@ -183,6 +262,8 @@ def main(argv=None):
         return do_undo(argv[1:])
     if argv[:1] == ["check"]:
         return do_check()
+    if argv[:1] == ["setup"]:
+        return do_setup()
     if argv[:1] == ["run"]:
         argv = argv[1:]
     opts = parser().parse_args(argv)
@@ -195,11 +276,19 @@ def main(argv=None):
         print("\n WordLyrics %s - word-by-word lyrics for your music\n" % __version__)
         print(" Your songs are only read. A full backup copy of the folder is made first,")
         print(" and the only thing added to it are new lyric files next to the songs.\n")
-        opts.folder = ask(" Music folder (type the path or drag the folder here), then Enter:\n > ")
-    source = os.path.abspath(os.path.expanduser(opts.folder or ""))
-    if not opts.folder or not os.path.isdir(source):
-        print("That is not a folder: %s" % (opts.folder or "(nothing given)"))
+        opts.folder = [p for p in [ask(" Music folder (type the path or drag the folder here), then Enter:\n > ")] if p]
+    source, opts.songs = songs_only(opts)
+    if source is None and opts.songs:
+        print(opts.songs)                                    # what is wrong with the songs given
         return 2
+    if source is None:
+        source = os.path.abspath(os.path.expanduser(opts.folder[0])) if len(opts.folder) == 1 else ""
+        if len(opts.folder) > 1:
+            print("Give one music folder, or song files. Not there: %s" % ", ".join(p for p in opts.folder if not os.path.exists(p)))
+            return 2
+        if not source or not os.path.isdir(source):
+            print("That is not a folder: %s" % (" ".join(opts.folder) or "(nothing given)"))
+            return 2
     if opts.dry_run:
         return dry_run(source, opts)
     if already_running():
@@ -238,23 +327,23 @@ def main(argv=None):
     from .pipeline import Run, Stop
     run = Run(source, opts, HOME)
     keep_awake(True)
-    code = 0
+    code, error = 0, ""
     try:
         run.run()
     except KeyboardInterrupt:
         run.stop.set()
         run.interrupted = True
-        code = 130
+        code, error = 130, "stopped"
         print("\nStopped.")
     except Stop as e:
-        code = 1
+        code, error = 1, str(e) or "stopped"
         print("\n" + (str(e) or "Stopped."))
     except backup.BackupError as e:
-        code = 1
+        code, error = 1, "the backup could not be completed: %s" % e
         print("\nThe backup could not be completed, so nothing else was done: %s" % e)
         print("Nothing was written to your music folder.")
     except Exception as e:
-        code = 1
+        code, error = 1, "%s: %s" % (type(e).__name__, e)
         run.problems.append("the run ended with an error: %s: %s" % (type(e).__name__, e))
         print("\nThe run ended with an error: %s: %s" % (type(e).__name__, e))
     finally:
@@ -275,6 +364,8 @@ def main(argv=None):
             print("The report could not be written: %s" % e)
     if run.interrupted and code == 0:
         code = 130
+    if opts.result:
+        write_result(opts.result, run, code, error)
     return code
 
 

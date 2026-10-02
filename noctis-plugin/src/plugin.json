@@ -1,0 +1,65 @@
+{
+  "id": "dev.moshi.wordlyrics",
+  "name": "WordLyrics",
+  "version": "1.0.0",
+  "author": "moshi",
+  "description": "Word-by-word lyrics for new songs, by themselves: when a song is added to a library folder (downloaded, copied, ripped), the WordLyrics program finds its lyrics and times every word in the background, and writes a .elrc file next to the song. Songs are only read. Needs the WordLyrics program on this computer; the switch below installs it.",
+  "type": "dotnet",
+  "entry": "WordLyricsForNoctis.dll",
+  "entryType": "WordLyricsForNoctis.WordLyricsPlugin",
+  "apiVersion": "1.1",
+  "minAppVersion": "1.5.3",
+  "platforms": ["windows"],
+  "permissions": ["menu.commands", "notifications", "network"],
+  "settings": [
+    {
+      "key": "auto",
+      "label": "Time new songs by themselves",
+      "type": "bool",
+      "default": true,
+      "description": "A song that appears in a library folder gets word-by-word lyrics a moment later. Off: only when you right-click a song and choose \"Time the words (WordLyrics)\"."
+    },
+    {
+      "key": "speed",
+      "label": "How hard the computer works",
+      "type": "choice",
+      "choices": ["Full", "Half", "Light"],
+      "default": "Half",
+      "description": "A share of what this computer's graphics card can do. One song takes a few seconds at Full; Light is for gaming at the same time."
+    },
+    {
+      "key": "notify",
+      "label": "Say when a song is done",
+      "type": "bool",
+      "default": true
+    },
+    {
+      "key": "folder",
+      "label": "WordLyrics folder",
+      "type": "string",
+      "default": "",
+      "description": "Leave empty for the usual place: the WordLyrics folder in your user folder."
+    },
+    {
+      "key": "backup",
+      "label": "Backup folder",
+      "type": "string",
+      "default": "",
+      "description": "WordLyrics keeps a copy of every song before it works on it. Leave empty for the usual place: a \"WordLyrics Backups\" folder on the drive with the most free space."
+    },
+    {
+      "key": "setup",
+      "label": "Install or update WordLyrics",
+      "type": "bool",
+      "default": false,
+      "description": "Flip this switch (either way). A window opens that downloads the program and its models (about 1.4 GB the first time) into the folder above and shows its progress. Nothing else on the computer is changed."
+    },
+    {
+      "key": "library",
+      "label": "Time the whole library",
+      "type": "bool",
+      "default": false,
+      "description": "Flip this switch (either way) to open WordLyrics on your first library folder: it makes a backup copy, then times every song that has no word-by-word lyrics yet."
+    }
+  ]
+}

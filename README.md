@@ -44,11 +44,44 @@ From a terminal:
     WordLyrics.bat "D:\Music" --backup-to "E:\Backups"
     WordLyrics.bat "D:\Music" --dry-run               only look: what is there, what would be done
     WordLyrics.bat "D:\Music" --offline               never go online for lyrics
+    WordLyrics.bat "D:\Music\Artist - Song.flac"      only that song (several may be given, or dragged onto it)
     WordLyrics.bat undo "D:\Music"                    take out again what WordLyrics wrote
     WordLyrics.bat check                              is everything installed, how fast is this computer
+    WordLyrics.bat setup                              fetch the models now instead of at the first run
 
 Other switches: `--speed full|half|light`, `--retry`, `--no-lrc`, `--quick-backup`, `--only TEXT`,
-`--limit N`, `--no-open`, `--plain-output`.
+`--limit N`, `--no-open`, `--plain-output`, and for other programs `--songs-from FILE` (a list of songs,
+one path per line) and `--result FILE` (what happened to each song, as JSON).
+
+## With the Noctis player: new songs get their lyrics by themselves
+
+A small plugin for [Noctis](https://github.com/heartached/Noctis) (1.5.3 or newer, Windows) watches your
+library folders. When a song appears there (downloaded, copied, ripped, however it got there) the plugin
+waits until the file has been left alone for 20 seconds, then has WordLyrics time that one song in the
+background, without a window. A notice in Noctis says when it is done. A song takes a few seconds.
+
+1. In Noctis: Settings → Plugins → turn on **Community plugins** → **Install from file…** → pick
+   `noctis-plugin\WordLyrics-for-Noctis.zip` in the WordLyrics folder
+   (or [download it](https://github.com/Alfamin/WordLyrics/raw/main/noctis-plugin/WordLyrics-for-Noctis.zip)).
+2. Switch the plugin on and approve what it asks for (a track menu entry, notices, internet).
+3. If WordLyrics itself is not on the computer yet, flip **Install or update WordLyrics** in the plugin's
+   settings: a window opens, installs it and fetches the models.
+
+What else it does:
+
+- Right-click any song → **Time the words (WordLyrics)**, for songs that were already there.
+- Songs that arrived while Noctis was closed are picked up at its next start.
+- It works with whatever brings the songs in, download plugins included: nothing has to be set up
+  between them, because the plugin only looks at the library folders.
+- It stops with Noctis. Closing Noctis in the middle stops the work; the songs not reached wait for
+  the next start. If WordLyrics is busy in its own window, the plugin waits for it.
+- Its settings: on/off, how hard the computer works (half by default), notices, the backup folder, the
+  WordLyrics folder, and a switch that opens WordLyrics on the whole library.
+
+The plugin does no lyric work itself and never touches a song: it starts WordLyrics on exactly the new
+songs. Everything said on this page about safety holds; of a new song only that song and the lyric files
+next to it are copied to the backup, into a folder named `<music folder> <date> (single songs)`.
+Its source is in `noctis-plugin\src`; `noctis-plugin\build.ps1` builds it without the .NET SDK.
 
 ## What it does, in order
 
@@ -57,6 +90,7 @@ Other switches: `--speed full|half|light`, `--retry`, `--no-lrc`, `--quick-backu
    space. Each run gets its own complete backup folder; files that did not change since the previous
    backup are shared with it instead of being copied again, so later backups take seconds.
    If the backup cannot be completed, nothing else happens.
+   (Given single songs instead of a folder, only those songs and their lyric files are copied.)
 2. **Read your songs.** Which lyrics does each song already have: a `.lrc` file, lyrics inside the song
    file, a `<song>.txt` you put next to it, or nothing. Songs that already have word-level lyrics are
    left alone.
@@ -120,6 +154,7 @@ Everything stays inside the WordLyrics folder:
 - `runs\<music folder>\lyrics service cache\` : answers from LRCLIB, so nothing is asked twice
 - `models\` : the two model files
 - `.python\` : the portable Python and its packages
+- `noctis-plugin\` : the plugin for the Noctis player
 
 ## What is downloaded, and from where
 

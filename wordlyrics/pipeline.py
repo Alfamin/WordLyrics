@@ -74,6 +74,15 @@ class Run:
         self.paused = False
         self.timer = None
         self.write_errors = 0              # lyric files in a row that could not be created
+        self.only_songs = getattr(opts, "songs", None)    # paths: handle only these songs, not the whole folder
+        self.not_usable = []               # [(path as given, why)] of those
+
+    def look(self, unreadable=None):
+        """The files this run is about: the whole folder, or only the named songs and what sits next to them."""
+        if self.only_songs is None:
+            return L.walk(self.source, self.exclude, unreadable)
+        files, self.not_usable = L.walk_songs(self.source, self.only_songs, self.exclude, unreadable)
+        return files, []
 
     # ------------------------------------------------------------------ small helpers
     def signature(self, song):
@@ -224,7 +233,8 @@ class Run:
             stage.count = "%s of %s" % (size(done), size(total))
             rate.add(done)
             stage.left = rate.left(total - done)
-        rec = backup.make(self.source, place, files, links, progress, verify=not self.opts.quick_backup, stop=self.stop)
+        rec = backup.make(self.source, place, files, links, progress, verify=not self.opts.quick_backup, stop=self.stop,
+                          part=self.only_songs is not None)
         self.backup_rec = rec
         how = "checked byte for byte" if rec["verified_byte_for_byte"] else "sizes checked"
         if rec["linked_to_previous_backup"]:
@@ -558,7 +568,7 @@ class Run:
         """Compare the music folder with how it was before: nothing missing, nothing changed, and the only
         new files are the lyric files this run wrote."""
         stage.start()
-        files, _ = L.walk(self.source, self.exclude)
+        files, _ = self.look()
         now = {rel: (sz, mt) for _, rel, sz, mt in files}
         mine = {os.path.normcase(w["rel"]) for w in self.written}
         missing = sorted(r for r in before if r not in now)
@@ -597,7 +607,10 @@ class Run:
         sc.start()
         try:
             unreadable = []
-            files, links = L.walk(self.source, self.exclude, unreadable)
+            files, links = self.look(unreadable)
+            few = self.only_songs is not None
+            for given, why in self.not_usable:
+                self.problems.append("Left out: %s (%s)" % (given, why))
             if unreadable:
                 self.problems.append("%d files or folders could not be read (no permission?). They were left alone and are "
                                      "not in the backup copy: %s%s" % (len(unreadable), ", ".join(unreadable[:10]),
@@ -608,11 +621,14 @@ class Run:
             if o.limit:
                 audio_files = audio_files[: o.limit]
             sc.fact("Music", "%s  (%d songs, %s in %d files)" % (self.source, len(audio_files), size(sum(f[2] for f in files)), len(files)))
+            if not audio_files and few:
+                raise Stop("None of the songs given is a song file inside %s. Nothing was done." % self.source)
             if not audio_files:
                 raise Stop("No songs were found in this folder (or its subfolders). Nothing was done.\n"
                            "Looked for: %s" % " ".join(sorted(x[1:] for x in L.AUDIO_EXT)))
-            models_dir = self.get_models(st_models)
-            engine_thread = self.start_engine(models_dir)
+            # a whole folder: the models load while the backup runs. A few songs: the models are only
+            # fetched and loaded once it is clear that there is something to listen to
+            engine_thread = None if few else self.start_engine(self.get_models(st_models))
             rec = self.do_backup(st_backup, files, links)
             before = rec["files"]
             self.read_songs(st_read, audio_files)
@@ -627,20 +643,31 @@ class Run:
                 self.enqueue(ready, s)
             ft = threading.Thread(target=self.fetcher, args=(st_fetch, todo_fetch, ready), daemon=True)
             ft.start()
-            st_time.note = "loading the models"
-            while engine_thread.is_alive():
-                engine_thread.join(0.5)
-                if self.stop.is_set():
-                    raise Stop()
-            if self.engine_error is not None:
-                raise self.engine_error
-            st_time.note = ""
-            try:
-                self.listen(st_time, ready, len(todo_listen))
-            except KeyboardInterrupt:                  # Ctrl+C: stop tidily, still check the folder and write the report
-                self.interrupted = True
-                self.stop.set()
-                st_time.skip("stopped by you")
+            if few:
+                while ft.is_alive():
+                    ft.join(0.5)
+                    if self.stop.is_set():
+                        raise Stop()
+                if self.queued_n:
+                    engine_thread = self.start_engine(self.get_models(st_models))
+                else:
+                    st_models.skip("not needed")
+                    st_time.skip("no song to listen to")
+            if engine_thread is not None:
+                st_time.note = "loading the models"
+                while engine_thread.is_alive():
+                    engine_thread.join(0.5)
+                    if self.stop.is_set():
+                        raise Stop()
+                if self.engine_error is not None:
+                    raise self.engine_error
+                st_time.note = ""
+                try:
+                    self.listen(st_time, ready, len(todo_listen))
+                except KeyboardInterrupt:              # Ctrl+C: stop tidily, still check the folder and write the report
+                    self.interrupted = True
+                    self.stop.set()
+                    st_time.skip("stopped by you")
             if self.stop.is_set():
                 self.interrupted = True
             ft.join(timeout=5)

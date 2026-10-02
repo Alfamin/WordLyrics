@@ -69,6 +69,12 @@
         Get-ChildItem -LiteralPath (Join-Path $src 'wordlyrics') -Filter '*.py' | ForEach-Object {
             Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $Dest ('wordlyrics\' + $_.Name)) -Force
         }
+        # the plugin for the Noctis player, ready for its "Install from file..." button
+        $plugin = Join-Path $src 'noctis-plugin\WordLyrics-for-Noctis.zip'
+        if (Test-Path -LiteralPath $plugin) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $Dest 'noctis-plugin') | Out-Null
+            Copy-Item -LiteralPath $plugin -Destination (Join-Path $Dest 'noctis-plugin\WordLyrics-for-Noctis.zip') -Force
+        }
         # a file you may have edited is never replaced
         $extra = Join-Path $Dest 'extra-links.txt'
         if (-not (Test-Path -LiteralPath $extra) -and (Test-Path -LiteralPath (Join-Path $src 'extra-links.txt'))) {

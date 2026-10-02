@@ -118,6 +118,53 @@ def walk(root, exclude=(), unreadable=None):
     return files, links
 
 
+def read_list(path):
+    """A text file with one song path per line (UTF-8). -> [paths]"""
+    return [ln.strip().strip('"') for ln in _read_text(path).splitlines() if ln.strip().strip('"')]
+
+
+def walk_songs(root, songs, exclude=(), unreadable=None):
+    """Like walk(), but only for the named songs: each song file and whatever sits next to it under the same
+    name (its lyric files, the same song in another format). -> files as from walk(), [songs that were not usable].
+    A song path may be absolute or relative to root."""
+    excl = [os.path.normcase(os.path.abspath(e)) for e in exclude if e]
+    top = _long_form(root)
+    files, bad, seen = {}, [], set()
+    for given in songs:
+        full = _long_form(given if os.path.isabs(given) else os.path.join(root, given))
+        rel = os.path.relpath(full, top) if os.path.splitdrive(full)[0].lower() == os.path.splitdrive(top)[0].lower() else ".."
+        usual = os.path.normcase(_usual_form(full))
+        if rel.startswith("..") or any(usual == e or usual.startswith(e + os.sep) for e in excl):
+            bad.append((given, "not inside the music folder"))
+            continue
+        if os.path.splitext(full)[1].lower() not in AUDIO_EXT or not os.path.isfile(full) or os.path.islink(full):
+            bad.append((given, "not a song file that is there"))
+            continue
+        folder, stem = os.path.dirname(full), os.path.normcase(os.path.splitext(os.path.basename(full))[0])
+        if (os.path.normcase(folder), stem) in seen:
+            continue
+        seen.add((os.path.normcase(folder), stem))
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError as e:
+            if unreadable is not None:
+                unreadable.append(os.path.relpath(getattr(e, "filename", None) or folder, top))
+            bad.append((given, "its folder could not be read"))
+            continue
+        for name in names:
+            if os.path.normcase(os.path.splitext(name)[0]) != stem:
+                continue
+            path = os.path.join(folder, name)
+            try:
+                if os.path.islink(path) or not os.path.isfile(path):
+                    continue
+                st = os.stat(path)
+            except OSError:
+                continue
+            files[os.path.normcase(path)] = (_usual_form(path), os.path.relpath(path, top), st.st_size, st.st_mtime_ns)
+    return sorted(files.values(), key=lambda f: f[1]), bad
+
+
 def _is_junction(path):
     try:
         return bool(getattr(os.path, "isjunction", lambda p: False)(path))
