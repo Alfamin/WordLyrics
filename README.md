@@ -107,7 +107,9 @@ Its source is in `noctis-plugin\src`; `noctis-plugin\build.ps1` builds it withou
    database. A result is used only when it is clearly the same recording: title and artist match, same
    version, and the length differs by 2.5 seconds at most.
 4. **Time the words.** The song is listened to by two models: one isolates the voice, one hears which
-   letters are sung when. The whole song is then matched against the lyrics in one pass.
+   letters are sung when. The whole song is then matched against the lyrics in one pass. Where a line is
+   sung more than once from the same recording (a hook, a chorus), what was heard in all copies is put
+   together, so a copy buried under the beat is helped by a clear one and the copies are timed alike.
 5. **Final check.** The folder is compared with how it was before the run.
 
 Steps 3 and 4 run side by side: songs that already have lyrics are timed while lyrics for the others are
