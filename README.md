@@ -70,6 +70,14 @@ Noctis by the installer. All that is left is to switch it on:
 Noctis keeps every new plugin switched off until you do this; the installer does not touch Noctis'
 settings.
 
+The same line also looks after two other Noctis plugins, each from its own repository:
+[Lyric Motion](https://github.com/Alfamin/LyricMotion) (animated lyrics) and
+[Free Music Finder](https://github.com/Alfamin/noctic-download-plugin) (finds and downloads songs). They
+are put into Noctis when they are missing and updated when a newer version is out; a plugin that is
+already up to date, or newer than the published one, is left alone. Their logins and settings are kept.
+Close Noctis before running the line, since Noctis holds its plugins' files while it is open. To leave
+the two out, set `$env:WORDLYRICS_NO_EXTRAS = '1'` first.
+
 The other way round (the plugin first): in Noctis choose **Install from file…** with
 `noctis-plugin\WordLyrics-for-Noctis.zip` from the WordLyrics folder
 (or [download it](https://github.com/Alfamin/WordLyrics/raw/main/noctis-plugin/WordLyrics-for-Noctis.zip)),
