@@ -286,89 +286,6 @@ def align_global(em, spf, rows, duration, band=BAND, drop_unheard=True):
     return True
 
 
-# ------------------------------------------------------------------ repeated lines help each other
-# A hook or chorus is often the same recording used again. Where copies of a line SOUND the same, what the
-# model heard in all of them is averaged and given to every copy, and the song is aligned again: a copy
-# buried under the beat gets help from a clear one, and the copies are timed alike. Measured on 197 songs:
-# words whose length differs between two copies of the same recording by more than 0.1 s went from 11.1%
-# to 7.6% (over 0.25 s: 5.3% -> 3.4%); word starts against hand-checked timings unchanged (37 songs).
-POOL_ENV_MIN = 0.90      # the voice loudness of two copies must match at least this well ...
-POOL_HEARD_MIN = 0.85    # ... and what the model heard in them this well (correlation, at the best shift)
-POOL_SHIFT_S = 0.5       # a copy is searched this far around where the first alignment put it
-POOL_MARGIN_S = 0.15     # sound kept around a copy's first and last word
-POOL_MIN_WORDS = 3       # shorter lines ("yeah yeah") are too easily alike by chance
-
-
-def _key(text):
-    return " ".join(re.sub(r"[^a-z0-9' ]", " ", text.lower()).split())
-
-
-def _ncc(a, b):
-    a = a - a.mean()
-    b = b - b.mean()
-    d = np.sqrt((a * a).sum() * (b * b).sum())
-    return float((a * b).sum() / d) if d > 0 else 0.0
-
-
-def _best_shift(piece, full, at, max_shift):
-    """Where piece fits best in full, searched within at +- max_shift rows -> (correlation, row)."""
-    n, best = len(piece), (-1.0, at)
-    for i in range(at - max_shift, at + max_shift + 1):
-        if 0 <= i and i + n <= len(full):
-            c = _ncc(piece, full[i: i + n])
-            if c > best[0]:
-                best = (c, i)
-    return best
-
-
-def pool_repeats(em, env, spf, rows):
-    """em: what the model heard (with the STAR column), rows: after a first alignment.
-    -> (em with the hearing of matching copies averaged (a copy; em itself is not changed), lines pooled)"""
-    groups = {}
-    for r in rows:
-        w = r.get("w")
-        if r["ts"] is None or not w or r.get("unheard") or len(r["text"].split()) < POOL_MIN_WORDS:
-            continue
-        got = [x for x in w if x is not None]
-        if len(got) >= POOL_MIN_WORDS:
-            groups.setdefault(_key(r["text"]), []).append(got)
-    if not any(len(g) > 1 for g in groups.values()):
-        return em, 0
-    em = em.copy()
-    heard = np.exp(em[:, :-1])
-    loud = np.log(np.asarray(env, np.float64) + 1e-4)
-    T, m = em.shape[0], int(POOL_MARGIN_S / spf)
-    taken = np.zeros(T, bool)
-    pooled = 0
-    for occ in groups.values():
-        if len(occ) < 2:
-            continue
-        occ.sort(key=lambda got: -float(np.median([x[2] for x in got])))     # the best-heard copy leads
-        ref = occ[0]
-        a0, a1 = max(0, ref[0][0] - m), min(T, ref[-1][1] + m)
-        n = a1 - a0
-        if n < int(0.6 / spf):
-            continue
-        e0, e1 = int(a0 * spf / 0.005), int(a1 * spf / 0.005)
-        starts = [a0]
-        for got in occ[1:]:
-            c, s = _best_shift(heard[a0:a1], heard, got[0][0] - (ref[0][0] - a0), int(POOL_SHIFT_S / spf))
-            if c < POOL_HEARD_MIN or s < 0 or s + n > T:
-                continue
-            c, _ = _best_shift(loud[e0:e1], loud, int(s * spf / 0.005), 4)
-            if c >= POOL_ENV_MIN:
-                starts.append(s)
-        starts.sort()
-        if len(starts) < 2 or any(b - a < n for a, b in zip(starts, starts[1:])) or any(taken[s: s + n].any() for s in starts):
-            continue                        # copies that overlap each other or an earlier group: left alone
-        mean = np.logaddexp.reduce(np.stack([em[s: s + n, :-1] for s in starts]), axis=0) - np.float32(np.log(len(starts)))
-        for s in starts:
-            em[s: s + n, :-1] = mean
-            taken[s: s + n] = True
-        pooled += len(starts)
-    return em, pooled
-
-
 # ------------------------------------------------------------------ from frames to what is shown
 def _snap(t, lo, on):
     if on is None or len(on) == 0:
@@ -574,18 +491,8 @@ def process(feat, text, band=BAND):
             break
     else:
         return None, rows, {"lines": 0, "lines_aligned": 0}, ["no alignment fits"]
-    em2, pooled = pool_repeats(em, env, spf, rows)
-    if pooled:
-        again = parse_lrc(text)
-        if align_global(em2, spf, again, dur, band):
-            rows, em = again, em2
-        else:                                   # cannot happen in practice; keep the first alignment then
-            pooled = 0
-            rows = parse_lrc(text)
-            align_global(em, spf, rows, dur, band)
     vr, thr = activity_from_env(env, em.shape[0], spf)
     stats = render(rows, spf, dur, vr, thr, onsets_from_env(env), True, band)
-    stats["lines_pooled"] = pooled
     _hearing(stats, rows)
     elrc = "\n".join(r.get("elrc", r["raw"]) for r in rows)
     return elrc, rows, stats, verify(elrc, rows, dur, band)
