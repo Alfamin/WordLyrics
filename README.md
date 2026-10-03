@@ -55,7 +55,7 @@ one path per line) and `--result FILE` (what happened to each song, as JSON).
 
 ## With the Noctis player: new songs get their lyrics by themselves
 
-A small plugin for [Noctis](https://github.com/heartached/Noctis) (1.5.3 or newer, Windows) watches your
+A small plugin for [Noctis](https://github.com/heartached/Noctis) (1.5.5 or newer, Windows) watches your
 library folders. When a song appears there (downloaded, copied, ripped, however it got there) the plugin
 waits until the file has been left alone for 20 seconds, then has WordLyrics time that one song in the
 background, without a window. A notice in Noctis says when it is done. A song takes a few seconds.

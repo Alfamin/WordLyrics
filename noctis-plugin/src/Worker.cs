@@ -25,8 +25,13 @@ internal sealed class Worker : IDisposable
     // A song with one of these next to it already has word-by-word lyrics.
     private static readonly string[] WordLyrics = { ".elrc", ".ttml", ".lyricsfile" };
 
-    private static readonly TimeSpan Tick = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan Quiet = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan Tick = TimeSpan.FromSeconds(1);
+    // How long a new file has to stay unchanged. A file that got its name by a rename (a download
+    // saved under a temporary name, a song renamed by hand) was whole before it got that name; one
+    // that was created under its name may still be written in pieces. Anyone who still has the file
+    // open for writing holds it back anyway (see Ripe).
+    private static readonly TimeSpan QuietAfterRename = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan QuietAfterCreate = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan GiveUpWaiting = TimeSpan.FromHours(6);
     private static readonly TimeSpan FolderCheck = TimeSpan.FromSeconds(60);
     private const int MaxSongsPerRun = 200;
@@ -59,6 +64,7 @@ internal sealed class Worker : IDisposable
         public int Tries;
         public DateTime Seen;
         public DateTime QuietSince;
+        public TimeSpan Quiet = QuietAfterCreate;
         public DateTime NotBefore;
         public long Length = -1;
         public DateTime Stamp;
@@ -254,7 +260,7 @@ internal sealed class Worker : IDisposable
                 item.Stamp = file.LastWriteTimeUtc;
                 if (!item.Asked) item.QuietSince = now;
             }
-            if (file.Length == 0 || (!item.Asked && now - item.QuietSince < Quiet)) return false;
+            if (file.Length == 0 || (!item.Asked && now - item.QuietSince < item.Quiet)) return false;
             // Still being written by whoever brought it?
             using (new FileStream(item.Path, FileMode.Open, FileAccess.Read, FileShare.Read)) { }
             if (HasWordLyrics(item.Path))
@@ -298,8 +304,8 @@ internal sealed class Worker : IDisposable
                         NotifyFilter = NotifyFilters.FileName,
                         InternalBufferSize = 64 * 1024,
                     };
-                    watcher.Created += (_, e) => Safe(() => Consider(e.FullPath, folder));
-                    watcher.Renamed += (_, e) => Safe(() => Consider(e.FullPath, folder));
+                    watcher.Created += (_, e) => Safe(() => Consider(e.FullPath, folder, QuietAfterCreate));
+                    watcher.Renamed += (_, e) => Safe(() => Consider(e.FullPath, folder, QuietAfterRename));
                     watcher.Error += (_, e) => Safe(() => OnWatcherError(folder, e.GetException()));
                     watcher.EnableRaisingEvents = true;
                     _watchers[folder] = watcher;
@@ -326,14 +332,23 @@ internal sealed class Worker : IDisposable
     }
 
     /// <summary>A file appeared (or got its final name) in a library folder.</summary>
-    private void Consider(string path, string root)
+    private void Consider(string path, string root, TimeSpan quiet)
     {
         if (!Audio.Contains(Path.GetExtension(path))) return;
+        // Taken now, so that the quiet time counts from this moment and not from the first look.
+        long length = -1;
+        var stamp = default(DateTime);
+        try
+        {
+            var file = new FileInfo(path);
+            if (file.Exists) (length, stamp) = (file.Length, file.LastWriteTimeUtc);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         var now = DateTime.UtcNow;
         lock (_gate)
         {
             if (_disposed || !_options.Auto || _items.ContainsKey(path)) return;
-            _items[path] = new Item { Path = path, Root = root, Seen = now, QuietSince = now, NotBefore = now };
+            _items[path] = new Item { Path = path, Root = root, Seen = now, QuietSince = now, Quiet = quiet, NotBefore = now, Length = length, Stamp = stamp };
             SaveState();
         }
     }
@@ -350,7 +365,7 @@ internal sealed class Worker : IDisposable
             {
                 if (_disposed) return;
                 if (file.CreationTimeUtc <= since || !Audio.Contains(file.Extension) || HasWordLyrics(file.FullName)) continue;
-                Consider(file.FullName, folder);
+                Consider(file.FullName, folder, QuietAfterCreate);
                 found++;
             }
             if (found > 0) _log($"{found} songs arrived in {folder} while Noctis was closed");

@@ -135,13 +135,22 @@ internal static class WlHost
         switch (scenario)
         {
             case "new-songs":
-                // 1: a download (no lyrics next to it), 2: a copied song with its .lrc, into a subfolder
-                Download(sources[0], Path.Combine(music, "Noctis Free Music"));
-                Wait(2);
+                // 1: a copied song with its .lrc, into a subfolder: created under its own name, so it
+                // has to stay unchanged for a while first
                 Copy(sources[1], Path.Combine(music, "Copied album"), withLrc: true);
-                Expect(Wait(15, () => State().Contains(Path.GetFileName(sources[0]))), "the download is on the waiting list");
-                Expect(!Logged("started WordLyrics"), "nothing is started while the files are still fresh");
-                Expect(Wait(240, () => Logs.Count(l => l.Contains("finished")) >= 1 && !State().Contains("\"path\"")), "both songs were handled");
+                Expect(Wait(3, () => State().Contains(Path.GetFileName(sources[1]))), "the copied song is on the waiting list");
+                Expect(!Wait(6, () => Logged("started WordLyrics")), "nothing is started while the copy is still fresh");
+                Expect(Wait(10, () => Logged("started WordLyrics")), "... but once it has stayed unchanged");
+                Expect(Wait(240, () => Logged("finished")), "the copied song was handled");
+                // 2: a download (no lyrics next to it): saved under a temporary name, so it is whole
+                // the moment it gets its name
+                Wait(2);
+                var started = Logs.Count(l => l.Contains("started WordLyrics"));
+                Download(sources[0], Path.Combine(music, "Noctis Free Music"));
+                var renamed = Clock.Elapsed.TotalSeconds;
+                Expect(Wait(5, () => Logs.Count(l => l.Contains("started WordLyrics")) > started),
+                    $"a finished download is handed over within seconds ({Clock.Elapsed.TotalSeconds - renamed:0.0} s)");
+                Expect(Wait(240, () => Logs.Count(l => l.Contains("finished")) >= 2 && !State().Contains("\"path\"")), "both songs were handled");
                 Wait(2);
                 foreach (var song in new[] { Path.Combine(music, "Noctis Free Music", Path.GetFileName(sources[0])), Path.Combine(music, "Copied album", Path.GetFileName(sources[1])) })
                     Expect(File.Exists(Path.ChangeExtension(song, ".elrc")), "word-by-word lyrics next to " + Path.GetFileName(song));

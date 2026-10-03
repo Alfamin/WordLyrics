@@ -44,6 +44,7 @@ if (-not (Test-Path "$App\WlHost.exe") -or (Get-Item "$here\WlHost.cs").LastWrit
     "host built"
 }
 
+New-Item -ItemType Directory -Force $Work | Out-Null
 $env:WL_OUT = Join-Path $Work "$Scenario.log"
 $env:WL_DATA = Join-Path $Work "data"
 $env:WL_MUSIC = Join-Path $Work "music"

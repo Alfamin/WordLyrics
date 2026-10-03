@@ -1,7 +1,7 @@
 # Builds the Noctis plugin against the Noctis that is installed on this PC and packs the zip that
 # Noctis takes in Settings -> Plugins -> "Install from file...".
 #
-#   powershell -File build.ps1 -Compiler C:\path\to\csc.exe
+#   powershell -File build.ps1 -Compiler C:\path\to\csc.exe [-Noctis C:\path\to\Noctis]
 #
 # No .NET SDK is needed: any Roslyn csc.exe will do (for example the one in the NuGet package
 # microsoft.net.compilers.toolset), and the reference assemblies are Noctis' own.
@@ -19,6 +19,16 @@ $zip = Join-Path $root "WordLyrics-for-Noctis.zip"
 
 if (-not (Test-Path $Compiler)) { throw "Compiler not found: $Compiler" }
 if (-not (Test-Path (Join-Path $Noctis "Noctis.Plugins.Abstractions.dll"))) { throw "Noctis not found in $Noctis" }
+
+# A plugin built against a newer plugin kit than the one plugin.json names is refused by every
+# Noctis that came with the older kit ("Could not load ... Noctis.Plugins.Abstractions,
+# Version=1.2.0.0"), so the kit has to be the one that apiVersion names. Noctis updates itself:
+# when it has moved on, point -Noctis at a copy of an older release.
+$api = (Get-Content (Join-Path $root "src\plugin.json") -Raw | ConvertFrom-Json).apiVersion
+$kit = [System.Reflection.AssemblyName]::GetAssemblyName((Join-Path $Noctis "Noctis.Plugins.Abstractions.dll")).Version
+if ("$($kit.Major).$($kit.Minor)" -ne $api) {
+    throw "The Noctis in $Noctis has plugin kit $($kit.Major).$($kit.Minor), but plugin.json says apiVersion $api. Use -Noctis with a Noctis release that has kit $api."
+}
 
 # Everything the app supplies at run time: the .NET libraries, Avalonia and the plugin kit.
 $refs = Get-ChildItem $Noctis -Filter *.dll | Where-Object {
