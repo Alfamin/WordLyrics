@@ -147,6 +147,12 @@ bare AAC, APE. All of these except APE were tested from start to finish.
 
 ## Speed
 
+Word endings receive a conservative final check using the already available voice and alignment data.
+It can shorten a fading ending by 0.08–0.25 seconds, while keeping word starts, line stamps,
+joined words, and the confidence gate unchanged. On 39 reserved Jamendo benchmark songs, line-final
+ends within 0.30 seconds improved from 84.6% to 87.7%; individual endings can still be wrong.
+This adds no extra model pass. Existing lyric files remain skipped as usual.
+
 It runs on the graphics card (any DirectX 12 card: AMD, NVIDIA, Intel). Measured on a Radeon RX 7900 XT:
 about 11 songs a minute at full speed. The computer is kept awake during a run. A run can be stopped
 with Ctrl+C (or by closing the window) and started again later: finished songs are skipped.

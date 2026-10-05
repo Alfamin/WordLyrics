@@ -17,6 +17,8 @@ import re
 
 import numpy as np
 
+from . import endings as E
+
 SR = 16000
 VOCAB = {c: i for i, c in enumerate(["<blank>", "<pad>", "</s>", "<unk>"] + list("aienoutsrmkldghybpwcvjzf'qx"))}
 STAR = len(VOCAB)  # extra column (log-prob 0): absorbs audio that is not in the text
@@ -494,6 +496,7 @@ def process(feat, text, band=BAND):
     vr, thr = activity_from_env(env, em.shape[0], spf)
     stats = render(rows, spf, dur, vr, thr, onsets_from_env(env), True, band)
     _hearing(stats, rows)
+    stats["end_refinements"] = E.refine(rows, feat, vr, thr, spf, fmt, need, GAP_JOIN)
     elrc = "\n".join(r.get("elrc", r["raw"]) for r in rows)
     return elrc, rows, stats, verify(elrc, rows, dur, band)
 
@@ -575,6 +578,7 @@ def process_plain(feat, text):
     stats.update(lines=len(rows), lines_unheard=sum(1 for r in rows if r.get("unheard")),
                  lines_unsure=sum(1 for r in rows if r["prob"] < PLAIN_UNSURE),
                  line_prob_median=float(np.median([r["prob"] for r in rows])), voice_s=float((vr >= thr).sum() * spf))
+    stats["end_refinements"] = E.refine(rows, feat, vr, thr, spf, fmt, need, GAP_JOIN)
     elrc = "\n".join(r["elrc"] for r in rows)
     return elrc, rows, stats, verify_plain(elrc, rows, dur)
 
