@@ -70,7 +70,7 @@ def default_place(source):
 
 
 def inside(child, parent):
-    c, p = os.path.normcase(os.path.abspath(child)), os.path.normcase(os.path.abspath(parent))
+    c, p = os.path.normcase(os.path.realpath(child)), os.path.normcase(os.path.realpath(parent))
     return c == p or c.startswith(p.rstrip("\\/") + os.sep)
 
 
@@ -143,7 +143,7 @@ def make(source, place, files, links=(), progress=None, verify=True, stop=None, 
     else:
         name = os.path.basename(source.rstrip("\\/")) or "music"
         only = " (single songs)" if part else ""
-        target = os.path.join(place, "%s %s%s.incomplete" % (name, datetime.now().strftime("%Y-%m-%d %H.%M.%S"), only))
+        target = os.path.join(place, "%s %s%s.incomplete" % (name, datetime.now().strftime("%Y-%m-%d %H.%M.%S.%f"), only))
         os.makedirs(target)
         note_path = target + NOTE
         with open(note_path, "w", encoding="utf-8") as fh:

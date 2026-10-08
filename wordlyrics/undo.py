@@ -20,27 +20,37 @@ def plan(home, source):
     move, keep, seen = [], [], set()
     if not os.path.exists(listing):
         return lib_home, move, keep
+    from .rerun import records
+    retimed={(r["rel"],r["sha256"]) for r in records(home,source)}
     with open(listing, newline="", encoding="utf-8") as fh:
-        for row in csv.DictReader(fh):
+        rows=list(csv.DictReader(fh))
+        for row in reversed(rows):
             rel = row["rel"]
             if rel in seen:
                 continue
             seen.add(rel)
             path = _usual_form(_long_form(os.path.join(source, rel)))
+            from .backup import inside
+            if not inside(path,source) or not rel.lower().endswith((".lrc",".elrc")) or os.path.islink(path):
+                keep.append((rel,"unsafe ownership record (left alone)"))
+                continue
             if not os.path.exists(path):
                 keep.append((rel, "no longer there"))
                 continue
             with open(path, "rb") as f:
                 same = hashlib.sha256(f.read()).hexdigest() == row["sha256"]
             if same:
-                move.append((path, rel))
+                if (rel,row["sha256"]) in retimed:
+                    keep.append((rel,"retimed lyrics: use Restore previous timing in the menu"))
+                else:
+                    move.append((path, rel))
             else:
                 keep.append((rel, "changed since it was written (left alone)"))
     return lib_home, move, keep
 
 
 def apply(lib_home, move):
-    dest = os.path.join(lib_home, "undone " + datetime.now().strftime("%Y-%m-%d %H.%M.%S"))
+    dest = os.path.join(lib_home, "undone " + datetime.now().strftime("%Y-%m-%d %H.%M.%S.%f"))
     done = 0
     for path, rel in move:
         target = _usual_form(_long_form(os.path.join(dest, rel)))

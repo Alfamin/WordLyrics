@@ -1,12 +1,14 @@
 """WordLyrics command line.
 
-  WordLyrics                      asks for the music folder, then runs
-  WordLyrics "D:\\Music"           run on that folder
+  WordLyrics                      opens the numbered menu
+  WordLyrics "D:\\Music"           opens the menu for that folder
   WordLyrics "D:\\Music" --dry-run only look and say what would be done
   WordLyrics "D:\\Music\\song.flac" only that song (several songs may be given)
   WordLyrics undo "D:\\Music"      take out again what the tool wrote
   WordLyrics check                is everything installed, and how fast is this computer
   WordLyrics setup                fetch the models now instead of at the first run, then check
+  WordLyrics providers            show lyric sources and local configuration status (no keys)
+  WordLyrics source SONG URL      choose a specific public Genius page for one song
 """
 from __future__ import annotations
 
@@ -36,7 +38,7 @@ _only_one = []
 def already_running():
     """Only one run at a time on a computer: two would fight over the graphics card's memory.
     The mark disappears by itself when the program ends, however it ends."""
-    if os.name != "nt":
+    if _only_one or os.name != "nt":
         return False
     try:
         import ctypes
@@ -44,11 +46,25 @@ def already_running():
         k32.CreateMutexW.restype = ctypes.c_void_p
         handle = k32.CreateMutexW(None, False, "WordLyrics-one-run-at-a-time")
         if handle and ctypes.get_last_error() == 183:        # ERROR_ALREADY_EXISTS
+            k32.CloseHandle.argtypes=[ctypes.c_void_p]
+            k32.CloseHandle(handle)
             return True
         _only_one.append(handle)                             # kept until the program ends
     except Exception:
         pass
     return False
+
+
+def release_running():
+    import gc
+    gc.collect()
+    if os.name=="nt" and _only_one:
+        import ctypes
+        close=ctypes.WinDLL("kernel32",use_last_error=True).CloseHandle
+        close.argtypes=[ctypes.c_void_p]
+        for handle in _only_one:
+            close(handle)
+    _only_one.clear()
 
 
 def ask(prompt):
@@ -74,6 +90,10 @@ def parser():
     ap.add_argument("--no-lrc", action="store_true", help="write only .elrc files, never an extra line-timed .lrc")
     ap.add_argument("--quick-backup", action="store_true", help="backup without reading every copied file back (faster, less thorough)")
     ap.add_argument("--retry", action="store_true", help="try again the songs an earlier run could not time (normally skipped while nothing about them changed)")
+    ap.add_argument("--redo",action="store_true",help="explicitly retime existing Enhanced LRC after a verified backup")
+    ap.add_argument("--retime-mode",choices=["current","guided","fresh"],default="current")
+    ap.add_argument("--confirm-redo",action="store_true",help="confirmation supplied by the interactive menu for a library rerun")
+    ap.add_argument("--lyrics-file",help="use this plain lyric file for exactly one selected song")
     ap.add_argument("--only", action="append", default=[], metavar="TEXT", help="only songs whose path contains this text (may be repeated)")
     ap.add_argument("--limit", type=int, default=0, metavar="N", help="only the first N songs (for a trial)")
     ap.add_argument("--no-open", action="store_true", help="do not open the report when done")
@@ -251,7 +271,7 @@ def write_result(path, run, code, error=""):
         print("The result file could not be written: %s" % e)
 
 
-def main(argv=None):
+def _main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -261,13 +281,59 @@ def main(argv=None):
     if argv[:1] == ["undo"]:
         return do_undo(argv[1:])
     if argv[:1] == ["check"]:
+        if already_running():
+            print("WordLyrics is busy. Check the installation after the current run.")
+            return 3
         return do_check()
     if argv[:1] == ["setup"]:
+        if already_running():
+            print("WordLyrics is busy. Setup will wait until the current run finishes.")
+            return 3
         return do_setup()
+    if argv[:1]==["menu"] or (not argv and sys.stdin.isatty() and sys.stdout.isatty()):
+        from .menu import run_menu
+        return run_menu(HOME,argv[1:] if argv[:1]==["menu"] else [],executor=main)
+    if argv[:1] == ["source"]:
+        from . import files, library as L
+        from .sources import genius_song_url
+        ap=argparse.ArgumentParser(prog="WordLyrics source",description="Choose an exact public Genius song page; audio validation still applies.")
+        ap.add_argument("song")
+        ap.add_argument("url")
+        args=ap.parse_args(argv[1:])
+        path=os.path.abspath(os.path.expanduser(args.song))
+        url=genius_song_url(args.url)
+        if not os.path.isfile(path) or os.path.islink(path) or os.path.splitext(path)[1].lower() not in L.AUDIO_EXT:
+            print("Give an existing song file, not a folder or link.")
+            return 2
+        if not url:
+            print("Give a public HTTPS Genius song lyric page.")
+            return 2
+        pin=os.path.splitext(path)[0]+".lyrics-source.txt"
+        if not files.create_new(pin,(url+"\r\n").encode("utf-8")):
+            print("A lyrics-source file already exists; edit it yourself to change the choice.")
+            return 2
+        print("Saved source choice: "+pin)
+        print("Run WordLyrics on that song. Existing word-timed files remain untouched.")
+        return 0
+    if argv[:1] == ["providers"]:
+        from .sources import settings
+        path = os.path.join(HOME, "lyrics-providers.json")
+        config = settings(path)
+        print("Lyric order: LRCLIB -> Genius")
+        print("LRCLIB: enabled")
+        print("Genius: " + ("disabled" if config.get("genius", True) is False else "enabled (public search/pages; no keys)"))
+        print("Local configuration: " + path)
+        if config.get("configuration_error"):
+            print("The local configuration could not be read; check its JSON syntax and value types.")
+            return 2
+        return 0
     if argv[:1] == ["run"]:
         argv = argv[1:]
     opts = parser().parse_args(argv)
     interactive = sys.stdin.isatty() and sys.stdout.isatty() and not opts.yes
+    if interactive and opts.folder and not opts.dry_run and not opts.redo and not opts.lyrics_file and not opts.songs_from:
+        from .menu import run_menu
+        return run_menu(HOME,opts.folder,executor=main,options=opts)
     wizard = not opts.folder
     if wizard:
         if not interactive:
@@ -289,6 +355,18 @@ def main(argv=None):
         if not source or not os.path.isdir(source):
             print("That is not a folder: %s" % (" ".join(opts.folder) or "(nothing given)"))
             return 2
+    if opts.lyrics_file and (opts.songs is None or len(opts.songs)!=1 or not os.path.isfile(opts.lyrics_file)):
+        print("A chosen lyric file needs exactly one selected song and an existing text file.")
+        return 2
+    if opts.songs is None and os.path.dirname(source)==source:
+        print("Choose a music folder, rather than an entire drive. Nothing was done.")
+        return 2
+    if opts.redo:
+        if opts.songs is None and not opts.confirm_redo:
+            print("Whole-library retiming needs confirmation in the numbered menu. Nothing was done.")
+            return 2
+        opts.quick_backup=False
+        opts.retry=True
     if opts.dry_run:
         return dry_run(source, opts)
     if already_running():
@@ -367,6 +445,13 @@ def main(argv=None):
     if opts.result:
         write_result(opts.result, run, code, error)
     return code
+
+
+def main(argv=None):
+    try:
+        return _main(argv)
+    finally:
+        release_running()
 
 
 if __name__ == "__main__":

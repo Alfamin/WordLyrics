@@ -46,10 +46,15 @@ class Song:
     title: str = ""
     album: str = ""
     albumartist: str = ""
+    explicit: bool | None = None    # advisory metadata, when present; never inferred from an arbitrary star rating
     tags_from: str = ""            # "tags" | "file name" | ""
     tier: int = NONE               # best lyrics already there
     lyrics_from: str = ""          # where they are: "file.lrc", "inside the song file", "file.txt"
     text: str = ""                 # those lyrics (never shown, never changed)
+    lyrics_url: str = ""           # explicit per-song source chosen by the user, if any
+    retime_path: str = ""
+    retime_sha256: str = ""
+    previous_tier: int | None = None
     has_lrc: bool = False
     skip: str = ""                 # set when the song is not to be handled at all, with the reason
     # filled in while running
@@ -227,6 +232,7 @@ def embedded(path):
         info["seconds"] = adts_seconds(path) or info["seconds"]
     t = m.tags
     kind = type(t).__name__ if t is not None else ""
+    low = {}
     if t is None:
         pass
     elif "ID3" in kind or hasattr(t, "getall"):                      # mp3, wav, aiff
@@ -272,7 +278,38 @@ def embedded(path):
         info.update(artist=g("artist"), title=g("title"), album=g("album"), albumartist=g("albumartist", "album artist"))
         for k in ("lyrics", "unsyncedlyrics", "syncedlyrics"):
             texts += low.get(k, [])
+    # Advisory flags distinguish explicit recordings from known clean recordings.
+    advisory = None
+    if "MP4" in kind:
+        rating = t.get("rtng")
+        if rating:
+            advisory = advisory_value(rating[0], itunes=True)
+    elif "ID3" in kind or hasattr(t, "getall"):
+        for frame in t.getall("TXXX"):
+            key = str(getattr(frame, "desc", "")).lower()
+            if key in ("itunesadvisory", "explicit", "contentrating") and getattr(frame, "text", None):
+                advisory = advisory_value(frame.text[0], itunes=key == "itunesadvisory")
+                if advisory is not None:
+                    break
+    elif t is not None:
+        for key in ("itunesadvisory", "explicit", "contentrating"):
+            if low.get(key):
+                advisory = advisory_value(low[key][0], itunes=key == "itunesadvisory")
+                if advisory is not None:
+                    break
+    info["explicit"] = advisory
     return info, [x for x in texts if isinstance(x, str) and x.strip()]
+
+
+def advisory_value(value, itunes=False):
+    value = str(value).strip().lower()
+    if value in ("explicit", "true", "yes"):
+        return True
+    if value in ("clean", "false", "no"):
+        return False
+    if itunes:
+        return True if value == "4" else False if value == "2" else None
+    return True if value == "1" else False if value == "0" else None
 
 
 NAME_RE = re.compile(r"^\s*(?:\d{1,3}\s*[-._]\s*)?(?P<artist>.+?)\s+-\s+(?P<title>.+?)\s*$")
@@ -284,26 +321,38 @@ def from_file_name(name):
     return (m.group("artist").strip(), m.group("title").strip()) if m else ("", "")
 
 
-def read_song(path, rel, size):
+def read_song(path, rel, size, *, redo=False, retime_mode="current", lyrics_file=None):
     """Everything known about one song without listening to it."""
     from . import audio
     s = Song(path=path, rel=rel, size=size)
     base = s.base
+    existing_word=None
     for ext in WORD_SIDECARS:
         if os.path.exists(base + ext):
             s.skip = "already has a %s lyrics file" % ext
             s.tier = WORD
             return s
     if os.path.exists(base + ".elrc"):
-        s.tier = WORD
-        s.skip = "already has word-by-word lyrics" if classify(_read_text(base + ".elrc")) == WORD else "already has an .elrc file"
-        return s
+        if not redo:
+            s.tier = WORD
+            s.skip = "already has word-by-word lyrics" if classify(_read_text(base + ".elrc")) == WORD else "already has an .elrc file"
+            return s
+        if os.path.islink(base+".elrc"):
+            s.skip="a linked lyric file is protected"
+            return s
+        import hashlib
+        with open(base+".elrc","rb") as f:
+            raw=f.read()
+        existing_word=raw.decode("utf-8-sig","replace")
+        s.retime_path=base+".elrc"
+        s.retime_sha256=hashlib.sha256(raw).hexdigest()
     texts = []
     try:
         info, emb = embedded(path)
         texts += [("inside the song file", t) for t in emb]
         s.seconds, s.artist, s.title = info.get("seconds", 0.0), info.get("artist", ""), info.get("title", "")
         s.album, s.albumartist = info.get("album", ""), info.get("albumartist", "")
+        s.explicit = info.get("explicit")
     except Exception:
         secs, meta = audio.probe(path)      # the tag reader gave up (wrongly named or unusual file)
         s.seconds = secs or 0.0
@@ -328,8 +377,49 @@ def read_song(path, rel, size):
             best = (tier, where, txt)
     if best:
         s.tier, s.lyrics_from, s.text = best
+    if redo:
+        from .sources import plain_words
+        s.previous_tier=WORD if existing_word is not None else s.tier
+        if retime_mode=="fresh":
+            s.tier,s.text=NONE,""
+        elif existing_word is not None:
+            s.text=WORD_TAG.sub("",existing_word) if retime_mode=="guided" else plain_words(existing_word)
+            s.tier=LINE if retime_mode=="guided" and classify(s.text)==LINE else PLAIN
+            s.lyrics_from="existing words (retiming)"
+        elif s.tier==WORD or (s.tier==LINE and retime_mode=="current"):
+            s.text,s.tier=plain_words(s.text),PLAIN
+    if lyrics_file:
+        from .sources import plain_words
+        if os.path.islink(lyrics_file):
+            s.skip="a linked lyric input is protected"
+            return s
+        with open(lyrics_file,"rb") as f:
+            raw=f.read(2_000_001)
+        if len(raw)>2_000_000:
+            s.skip="the supplied lyric file is too large"
+            return s
+        s.text,s.tier=plain_words(raw.decode("utf-8-sig")),PLAIN
+        s.lyrics_from="chosen lyric file"
     if s.tier == WORD:
         s.skip = "already has word-by-word lyrics"
+    if not s.skip and not lyrics_file and os.path.lexists(base+".lyrics-source.txt"):
+        from .sources import genius_song_url
+        pin=base+".lyrics-source.txt"
+        try:
+            if os.path.islink(pin):
+                raise ValueError("source link is a symbolic link")
+            with open(pin,"rb") as f:
+                raw=f.read(4097)
+            if len(raw)>4096:
+                raise ValueError("source link file is too large")
+            choice=raw.decode("utf-8-sig").strip()
+            s.lyrics_url="" if choice.lower()=="auto" else genius_song_url(choice)
+            if not s.lyrics_url and choice.lower()!="auto":
+                raise ValueError("not a Genius song page")
+        except (OSError,ValueError,UnicodeError):
+            s.skip="invalid lyrics-source file (use one public Genius song URL)"
+    if lyrics_file:
+        s.lyrics_url=""
     return s
 
 

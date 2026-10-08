@@ -1,5 +1,5 @@
-"""Finding lyrics for songs that have none (or only plain ones): LRCLIB (https://lrclib.net), a free
-public lyrics database. Network only; never touches a song.
+"""Find recording-matched lyrics: LRCLIB first, then Genius.
+Network only; never touches a song. Masked lyrics do not outrank uncensored words.
 
 A wrong lyric is worse than no lyric, so a result is used only when it is clearly the same recording:
 title and artist match, same version (remix / live / ...), and the length differs by at most 2.5 s.
@@ -10,6 +10,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import math
 import os
 import re
 import threading
@@ -32,13 +33,18 @@ class Offline(Exception):
 
 
 class Client:
-    def __init__(self, cache_dir):
+    def __init__(self, cache_dir, config_path=None, provider_config=None, refresh=False):
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
         self.interval = MIN_INTERVAL
         self.last = 0.0
         self.errors_in_a_row = 0
         self.lock = threading.Lock()
+        self.refresh = bool(refresh)
+        from .sources import settings
+        self.provider_config = settings(config_path) if provider_config is None else dict(provider_config)
+        self.provider_disabled = {}
+        self.source_notes = []
 
     def _cache(self, key):
         return os.path.join(self.cache_dir, hashlib.sha1(key.encode("utf-8")).hexdigest() + ".json")
@@ -47,11 +53,12 @@ class Client:
         """-> ('ok', data) | ('notfound', None) | ('error', message). Only ok / notfound are remembered."""
         url = API + endpoint + "?" + urllib.parse.urlencode(sorted(params.items()))
         cp = self._cache(url)
-        if os.path.exists(cp):
+        if os.path.exists(cp) and not self.refresh:
             try:
                 c = json.load(open(cp, encoding="utf-8"))
                 # "not there" is asked again after a month: the database keeps growing
-                if c["status"] == "ok" or time.time() - c.get("ts", 0) < 30 * 86400:
+                lifetime = 7 * 86400 if c["status"] == "ok" else 86400
+                if time.time() - c.get("ts", 0) < lifetime:
                     return c["status"], c["data"]
             except Exception:
                 pass
@@ -67,12 +74,16 @@ class Client:
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
                 with urllib.request.urlopen(req, timeout=30) as r:
-                    data = json.loads(r.read().decode("utf-8"))
+                    raw = r.read(2_000_001)
+                    if len(raw) > 2_000_000:
+                        raise ValueError("lyrics service response too large")
+                    data = json.loads(raw.decode("utf-8"))
                 self._remember(cp, "ok", data)
                 self.interval = max(MIN_INTERVAL, self.interval * 0.9)
                 self.errors_in_a_row = 0
                 return "ok", data
             except urllib.error.HTTPError as e:
+                e.close()
                 if e.code == 404:
                     self._remember(cp, "notfound", None)
                     self.errors_in_a_row = 0
@@ -130,7 +141,9 @@ def strip_feat(s):
 
 def version_tokens(s):
     low = _ascii(s).lower()
-    return {w for w in VERSION_WORDS if re.search(r"\b" + re.escape(w) + r"\b", low)}
+    tokens = {w for w in VERSION_WORDS if re.search(r"\b" + re.escape(w) + r"\b", low)}
+    tokens.update("version " + m.group(1) for m in re.finditer(r"\b(?:v|version|take)\s*(\d+)\b", low))
+    return tokens
 
 
 def norm(s, dollar="s"):
@@ -183,22 +196,39 @@ class Found:
     title_sim: float = 0.0
     seconds_off: float = 0.0
     reasons: list = field(default_factory=list)
+    provider: str = "lrclib.net"
+    url: str = ""
+    require_audio_match: bool = False
+    pinned: bool = False
 
 
-def judge(song, src_artist, src_title, src_seconds):
+def judge(song, src_artist, src_title, src_seconds, *, allow_unknown_duration=False, allow_release_label=False):
     """-> (same recording?, reasons why not)"""
     reasons = []
+    src_artist = src_artist if isinstance(src_artist, str) else ""
+    src_title = src_title if isinstance(src_title, str) else ""
     best = max(sim(t, src_title) for t in title_variants(song.title))
     if best < 0.92:
         reasons.append("title differs")
     if not artist_ok(song.artist, song.albumartist, src_artist):
         reasons.append("artist differs")
-    if version_tokens(song.title) != version_tokens(src_title):
+    file_versions, source_versions = version_tokens(song.title), version_tokens(src_title)
+    difference = file_versions ^ source_versions
+    # Genius may omit a file's '(unreleased)' or '(leak)' label. Such matches must pass the audio test.
+    release_label_only = allow_release_label and difference <= {"unreleased", "leak"}
+    clean_label_only = getattr(song, "explicit", None) is False and difference == {"clean"} and "clean" in source_versions
+    if difference and not (release_label_only or clean_label_only):
         reasons.append("another version (remix / live / ...)")
-    off = None if not src_seconds or not song.seconds else abs(float(song.seconds) - float(src_seconds))
-    if off is None:
+    try:
+        off = None if not src_seconds or not song.seconds else abs(float(song.seconds) - float(src_seconds))
+        if off is not None and not math.isfinite(off):
+            raise ValueError("invalid duration")
+    except (ValueError, TypeError):
+        off = None
+        reasons.append("length invalid")
+    if off is None and not allow_unknown_duration:
         reasons.append("length unknown")
-    elif off > 2.5:
+    elif off is not None and off > 2.5:
         reasons.append("length differs by %.0f s" % off)
     return not reasons, reasons, best, off
 
@@ -217,23 +247,49 @@ def text_sim(a, b):
     return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
 
 
+def wants_uncensored(song):
+    """Unknown recordings use the user's explicit preference; known clean recordings stay clean."""
+    advisory = getattr(song, "explicit", None)
+    if advisory is not None:
+        return advisory
+    clean_label = re.search(r"(?i)(?:[\[(]\s*clean(?:\s+(?:version|edit|edition))?\s*[\])]|"
+                            r"[-–—]\s*clean(?:\s+(?:version|edit|edition))?\s*$|\bclean\s+(?:version|edit|edition)\b)", song.title)
+    return not bool(clean_label)
+
+
+def needs_lookup(song):
+    return bool(getattr(song,"lyrics_url","")) or song.tier in (L.NONE, L.INSTRUMENTAL, L.PLAIN) or \
+           (song.tier == L.LINE and wants_uncensored(song) and censored(song.text))
+
+
+def censored(text):
+    """Detect visible masking, never guess or reconstruct the missing word."""
+    body = _TAGS.sub(" ", text or "")
+    return bool(re.search(r"(?i)(?:\b\w+[\*•●_]+\w*|\b\w+[—–-]{2,}\w+|(?<!\w)\*{2,}(?!\w)|"
+                          r"\[(?:censored|bleep|beep)\]|\((?:censored|bleep|beep)\))", body))
+
+
 def _usable(c, song):
     """One record of the service -> Found | 'instrumental' | None"""
     if c.get("instrumental"):
         return "instrumental"
-    synced = (c.get("syncedLyrics") or "").replace("\r\n", "\n").strip()
-    if synced and L.classify(synced) == L.LINE:
+    synced = c.get("syncedLyrics")
+    synced = synced.replace("\r\n", "\n").strip() if isinstance(synced, str) else ""
+    if synced and L.classify(synced) == L.WORD:
+        synced = L.WORD_TAG.sub("", synced)       # provider word times never bypass our own aligner
+    if synced and L.classify(synced) == L.LINE and not (wants_uncensored(song) and censored(synced)):
         stamps = [m for m in (L.LINE_TAG.match(ln) for ln in synced.split("\n")) if m]
         last = max(int(m.group(1)) * 60 + int(m.group(2)) for m in stamps)
         if last <= song.seconds + 3 and len(stamps) >= 5:      # must fit inside the song
             return Found(L.LINE, synced, c.get("id") or 0)
-    plain = (c.get("plainLyrics") or "").replace("\r\n", "\n").strip()
-    if len(plain) >= 40:
+    plain = c.get("plainLyrics")
+    plain = plain.replace("\r\n", "\n").strip() if isinstance(plain, str) else ""
+    if len(plain) >= 40 and not (wants_uncensored(song) and censored(plain)):
         return Found(L.PLAIN, plain, c.get("id") or 0)
     return None
 
 
-def lookup(client, song, stop=None):
+def _lrclib_lookup(client, song, stop=None):
     """-> (Found | None, note). note says why nothing usable was found."""
     if not song.artist.strip() or not song.title.strip():
         return None, "no artist and title to search with"
@@ -244,7 +300,7 @@ def lookup(client, song, stop=None):
         for a in dict.fromkeys([song.artist, *artist_tokens(song.artist)[:1]]):
             if (a, t) not in variants:
                 variants.append((a, t))
-    good, near, errors, instrumental, seen = [], [], 0, False, set()
+    good, near, errors, instrumental, seen, masked = [], [], 0, False, set(), False
     for a, t in variants[:3]:
         cands = []
         params = {"artist_name": a, "track_name": t, "duration": int(round(song.seconds))}
@@ -267,6 +323,8 @@ def lookup(client, song, stop=None):
             seen.add(c.get("id"))
             ok, reasons, ts, off = judge(song, c.get("artistName", ""), c.get("trackName", ""), c.get("duration"))
             f = _usable(c, song)
+            masked = masked or bool(ok and wants_uncensored(song) and
+                                    any(censored(c.get(k)) for k in ("plainLyrics", "syncedLyrics") if isinstance(c.get(k),str)))
             if f == "instrumental":
                 instrumental = instrumental or ok
             elif f is not None:
@@ -281,6 +339,8 @@ def lookup(client, song, stop=None):
             return None, "listed as an instrumental"
         if near:
             return None, "found, but not surely the same recording (%s)" % near[0].reasons[0]
+        if masked:
+            return None, "censored lyrics were skipped"
         return None, "not in the lyrics database"
     best = max(good, key=lambda f: (f.tier, -f.seconds_off))
     others = [f for f in good if f is not best]
@@ -289,3 +349,31 @@ def lookup(client, song, stop=None):
         if agree / len(others) < 0.5:
             return None, "the database has conflicting lyrics for this song"
     return best, ""
+
+
+def lookup(client, song, stop=None, skip=()):
+    """LRCLIB keeps priority; failures and censored results reach the next provider."""
+    client.source_notes = []
+    if getattr(song,"lyrics_url",""):
+        if "genius.com" in skip:
+            return None,"the chosen Genius lyrics did not pass the recording or timing checks"
+        from .sources import genius_page
+        return genius_page(client,song,song.lyrics_url,stop,pinned=True)
+    found, note = _lrclib_lookup(client, song, stop) if "lrclib.net" not in skip else (None, "")
+    if found is not None or not song.artist.strip() or not song.title.strip() or not song.seconds:
+        return found, note
+    from .sources import genius
+    notes = [note] if note else []
+    for label, provider in (("genius.com", genius),):
+        if label in skip:
+            continue
+        if stop is not None and stop.is_set():
+            return None, "stopped"
+        candidate, why = provider(client, song, stop)
+        if candidate is not None:
+            client.errors_in_a_row = 0
+            return candidate, ""
+        if why:
+            notes.append(why)
+    client.source_notes = notes
+    return None, "; ".join(dict.fromkeys(notes))

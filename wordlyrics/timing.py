@@ -127,7 +127,7 @@ def onsets_from_env(env, quiet_s=0.06):
 
 
 # ------------------------------------------------------------------ alignment
-def viterbi_banded(em, targets, lo, hi):
+def viterbi_banded(em, targets, lo, hi, prior=None):
     """Best monotonic CTC path of `targets` through `em` where target j may only use frames lo[j]..hi[j].
     -> (first, last) frame per target, or None when no path fits."""
     T, L = em.shape[0], len(targets)
@@ -138,6 +138,9 @@ def viterbi_banded(em, targets, lo, hi):
     z[1::2] = targets
     can_skip = np.zeros(S, bool)
     can_skip[3::2] = z[3::2] != z[1:-2:2]
+    if prior is not None:
+        plo, phi, weight = np.full(S, -1e9), np.full(S, 1e9), np.zeros(S)
+        plo[1::2], phi[1::2], weight[1::2] = np.asarray(prior).T
     slo = np.zeros(S, np.int64)
     shi = np.full(S, T - 1, np.int64)
     slo[1::2] = lo
@@ -171,6 +174,9 @@ def viterbi_banded(em, targets, lo, hi):
         best[m] = skp[m]
         k[m] = 2
         new = best + em[t, z[a:b]]
+        if prior is not None:
+            distance = np.maximum(np.maximum(plo[a:b] - t, t - phi[a:b]), 0)
+            new -= (distance * weight[a:b]).astype(np.float32)
         pa = int(fa[t - 1])
         if a > pa:
             dpp[pa + 2: a + 2] = NEG
@@ -192,7 +198,7 @@ def viterbi_banded(em, targets, lo, hi):
     return first, last
 
 
-def _one_pass(em, spf, rows, duration, band):
+def _one_pass(em, spf, rows, duration, band, soft_windows=None):
     """One alignment for the whole song. Adds r['w'] = [(start_frame, end_frame, prob) | None per word]
     to every line that has something to hear. band=None ignores the line stamps."""
     T = em.shape[0]
@@ -200,6 +206,7 @@ def _one_pass(em, spf, rows, duration, band):
     for r in timed:
         r.pop("w", None)
     targets, lo, hi, marks = [STAR], [0], [T - 1], []
+    prior = [(-1e9, 1e9, 0.0)]
     for i, r in enumerate(timed):
         words = r["text"].split()
         toks = [word_tokens(w) for w in words]
@@ -213,19 +220,23 @@ def _one_pass(em, spf, rows, duration, band):
         f_lo = 0 if band is None else max(0, int((r["ts"] - back) / spf))
         f_hi = T - 1 if band is None else min(T - 1, int((nxt + fwd) / spf))
         r["nxt"] = nxt
+        window = soft_windows.get(id(r)) if soft_windows is not None else None
+        penalty = (window[0] / spf, window[1] / spf, window[2] * spf) if window else (-1e9, 1e9, 0.0)
         spans = []
         for tk in toks:
             spans.append((len(targets), len(targets) + len(tk)))
             targets += tk
             lo += [f_lo] * len(tk)
             hi += [f_hi] * len(tk)
+            prior += [penalty] * len(tk)
         marks.append((r, spans))
         targets.append(STAR)       # whatever is sung between two lines but is not in the text
         lo.append(f_lo)
         hi.append(T - 1)
+        prior.append((-1e9, 1e9, 0.0))
     if not marks:
         return False
-    res = viterbi_banded(em, np.array(targets), np.array(lo), np.array(hi))
+    res = viterbi_banded(em, np.array(targets), np.array(lo), np.array(hi), prior if soft_windows is not None else None)
     if res is None:
         return False
     first, last = res
@@ -535,13 +546,17 @@ PLAIN_MAX_UNHEARD = 0.05     # at most this share may be not heard at all
 PLAIN_MIN_LINES = 6
 
 
-def process_plain(feat, text):
-    """Lyrics WITHOUT timestamps: the model places every line itself (one pass over the whole song).
+def process_plain(feat, text, *, refine=True):
+    """Lyrics WITHOUT timestamps: coarse global alignment, then a guarded refinement audit.
     -> (elrc text | None, rows, stats, problems). Whether the result may be used is decided by plain_gate."""
     em, env, dur, spf = combine(feat)
     rows = plain_rows(text)
     if not rows or not align_global(em, spf, rows, dur, None):
         return None, rows, {"lines": len(rows), "lines_aligned": 0}, ["no alignment fits"]
+    refinement = {"plain_passes": 1, "plain_refinement": "off"}
+    if refine:
+        from . import plain_refine
+        rows, refinement = plain_refine.refine(rows, em, spf, dur)
     _h = {}
     _hearing(_h, rows)
     for r in rows:
@@ -554,6 +569,7 @@ def process_plain(feat, text):
     on = onsets_from_env(env)
     stats = render(rows, spf, dur, vr, thr, on, True, None)
     stats.update(_h)
+    stats.update(refinement)
     # a line without word timing still needs a moment to be shown at: where the model put it, or (not
     # heard at all) spread over the time between the lines around it
     i, last, prev_end = 0, 0.0, 0.0

@@ -2,6 +2,10 @@
 .python-setup/
 models/
 runs/
+selections/
+source-choice backups/
+menu-settings.json
 __pycache__/
 speed test.json
+lyrics-providers.json
 noctis-plugin/build/

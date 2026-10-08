@@ -1,10 +1,9 @@
 """One run over a music folder: backup -> read songs -> find lyrics -> listen and time the words -> check.
 
 Safety rules that hold everywhere in this file
-  * Songs and every other existing file are only read. Nothing is changed, moved, renamed or removed.
-  * The only things written into the music folder are NEW lyric files next to a song (<song>.elrc with
-    word timing, and <song>.lrc for songs that had no line-timed lyrics file). A file that already
-    exists is never overwritten: files are created in "new file only" mode.
+  * Songs and tags are only read. Normal runs create new sidecars exclusively.
+  * Explicit retiming may replace an existing .elrc only after its independent backup
+    verifies and the accepted output is saved as a candidate. No other existing file is replaced.
   * Every file written is listed, with its fingerprint, so it can be taken out again (see undo.py).
   * At the end the folder is compared with how it was before the run.
 """
@@ -20,7 +19,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from . import __version__, audio, backup, decide, fetch, models
+from . import __version__, audio, backup, decide, fetch, files as safe_files, models
 from . import library as L
 from . import separate as S
 from . import timing as T
@@ -50,7 +49,7 @@ class Run:
         self.home = home
         self.lib_home = library_home(home, self.source)
         self.started = datetime.now()
-        self.run_dir = os.path.join(self.lib_home, "run " + self.started.strftime("%Y-%m-%d %H.%M.%S"))
+        self.run_dir = os.path.join(self.lib_home, "run " + self.started.strftime("%Y-%m-%d %H.%M.%S.%f"))
         self.stop = threading.Event()
         self.screen = Screen("WordLyrics - word-by-word lyrics for your music", plain=opts.plain_output)
         self.songs = []
@@ -58,6 +57,8 @@ class Run:
         self.write_lock = threading.Lock()
         self.backup_rec = None
         self.engine = None
+        self.engine_loader = None
+        self.lyrics_client = None
         self.engine_error = None
         self.counts = {}
         self.check = None
@@ -91,7 +92,8 @@ class Run:
             st = os.stat(song.path)
         except OSError:
             return ""
-        used = (song.text or "") + "\x00" + (song.found.text if song.found is not None else "")
+        used = (song.text or "") + "\x00" + (song.found.text if song.found is not None else "") + \
+               "\x00" + song.lyrics_url + "\x00" + str(song.explicit)
         return "%d:%d:%s:%s" % (st.st_size, st.st_mtime_ns, hashlib.sha1(used.encode("utf-8", "replace")).hexdigest(), __version__)
 
     # ------------------------------------------------------------------ how hard to work
@@ -151,27 +153,41 @@ class Run:
                 self.log.flush()
 
     def put_file(self, song, ext, text, kind):
-        """Create <song><ext> next to the song. New file only. -> True when written."""
+        """Publish accepted lyrics; explicit retiming requires a verified original backup."""
         path = song.base + ext
         data = file_bytes(text)
-        try:
-            with open(path, "xb") as fh:                   # "x": fails if the file exists, so nothing is ever overwritten
-                fh.write(data)
-                fh.flush()
-                os.fsync(fh.fileno())
-        except FileExistsError:
+        rec = {"rel": os.path.splitext(song.rel)[0] + ext, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data),
+               "kind": kind, "time": datetime.now().isoformat(timespec="seconds")}
+        replacement=bool(ext==".elrc" and getattr(self.opts,"redo",False) and song.retime_path)
+        if replacement:
+            if not self.backup_rec or not self.backup_rec.get("verified_byte_for_byte"):
+                raise OSError("A verified backup is required before retiming existing lyrics")
+            previous_rel=os.path.splitext(song.rel)[0]+".elrc"
+            saved=os.path.join(self.backup_rec["path"],previous_rel)
+            candidate=os.path.join(self.run_dir,"retiming candidates",previous_rel)
+            os.makedirs(os.path.dirname(candidate),exist_ok=True)
+            if not safe_files.create_new(candidate,data):
+                raise OSError("A candidate file already exists; original lyrics were preserved")
+            rec.update(previous_sha256=song.retime_sha256,backup=saved,candidate=candidate)
+            # Persist recovery information before replacement, including if the process
+            # stops between replacing the sidecar and updating the ownership CSV.
+            with self.write_lock:
+                with open(os.path.join(self.run_dir,"retimed.jsonl"),"a",encoding="utf-8") as f:
+                    f.write(json.dumps(rec,ensure_ascii=False)+"\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+            safe_files.replace_backed_up(path,data,saved,song.retime_sha256)
+        elif not safe_files.create_new(path,data):
             return False
         with open(path, "rb") as fh:
             if fh.read() != data:
                 raise OSError("the lyrics file did not read back as written: " + os.path.basename(path))
-        rec = {"rel": os.path.splitext(song.rel)[0] + ext, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data),
-               "kind": kind, "time": datetime.now().isoformat(timespec="seconds")}
         with self.write_lock:
             self.written.append(rec)
             for p in (os.path.join(self.run_dir, "files written.csv"), os.path.join(self.lib_home, "all files written.csv")):
                 new = not os.path.exists(p)
                 with open(p, "a", newline="", encoding="utf-8") as fh:
-                    w = csv.DictWriter(fh, fieldnames=["rel", "sha256", "bytes", "kind", "time"])
+                    w = csv.DictWriter(fh, fieldnames=["rel", "sha256", "bytes", "kind", "time"],extrasaction="ignore")
                     if new:
                         w.writeheader()
                     w.writerow(rec)
@@ -252,7 +268,9 @@ class Run:
         def one(i):
             path, rel, sz, _ = audio_files[i]
             try:
-                out[i] = L.read_song(path, rel, sz)
+                out[i] = L.read_song(path, rel, sz, redo=getattr(self.opts,"redo",False),
+                                     retime_mode=getattr(self.opts,"retime_mode","current"),
+                                     lyrics_file=getattr(self.opts,"lyrics_file",None))
             except Exception as e:
                 s = L.Song(path=path, rel=rel, size=sz)
                 s.skip = "could not be read (%s)" % type(e).__name__
@@ -283,6 +301,7 @@ class Run:
             except Exception as e:
                 self.engine_error = e
         t = threading.Thread(target=load, daemon=True)
+        self.engine_loader=t
         t.start()
         return t
 
@@ -296,14 +315,18 @@ class Run:
             if self.opts.offline:
                 stage.skip("switched off (--offline)")
                 for s in todo:
-                    if s.tier == L.PLAIN:
+                    if s.tier in (L.PLAIN, L.LINE) and not s.lyrics_url and not (fetch.wants_uncensored(s) and fetch.censored(s.text)):
                         self.enqueue(ready, s)
                     else:
                         self.no_lyrics(s, "no lyrics, and looking online is switched off")
                 return
             stage.start()
             stage.total = self.undecided = len(todo)
-            client = fetch.Client(os.path.join(self.lib_home, "lyrics service cache"))
+            client = fetch.Client(os.path.join(self.lib_home, "lyrics service cache"),
+                                  config_path=os.path.join(self.home, "lyrics-providers.json"), refresh=self.opts.retry)
+            self.lyrics_client = client
+            if client.provider_config.get("configuration_error"):
+                self.problems.append("Genius was disabled because lyrics-providers.json could not be read. Check its JSON syntax and value types.")
             rate = Rate(120)
             pauses = 0
             for n, s in enumerate(todo, 1):
@@ -322,7 +345,7 @@ class Run:
                             self.screen.say("Giving up on looking for lyrics online for the remaining songs. Run again later to retry them.")
                 s.found, s.fetch_note = found, note
                 self.undecided = len(todo) - n
-                if found is not None or s.tier == L.PLAIN:
+                if found is not None or (s.tier == L.PLAIN and not s.lyrics_url and not (fetch.wants_uncensored(s) and fetch.censored(s.text))):
                     self.enqueue(ready, s)
                 elif s.tier == L.INSTRUMENTAL:
                     self.no_lyrics(s, "marked as an instrumental")
@@ -466,14 +489,23 @@ class Run:
     def attempts(self, song):
         """Which lyrics to try, best first: [(mode, text, whose)]"""
         f, out = song.found, []
+        if song.lyrics_url:
+            return [("plain",f.text,"found",True)] if f is not None and f.pinned else []
+        masked = fetch.wants_uncensored(song) and fetch.censored(song.text)
+        if masked:
+            if f is not None and fetch.text_sim(f.text, song.text) >= 0.60:
+                out.append(("line" if f.tier == L.LINE else "plain", f.text, "found", True))
+            return out
         if song.tier == L.LINE:
             out.append(("line", song.text, "yours"))
         elif song.tier == L.PLAIN:
             if f is not None and f.tier == L.LINE and fetch.text_sim(f.text, song.text) >= 0.60:
                 out.append(("line", f.text, "found"))          # same words as yours, but with line times
+            elif f is not None and f.tier == L.PLAIN and fetch.text_sim(f.text, song.text) >= 0.60:
+                out.append(("plain", f.text, "found", f.require_audio_match))
             out.append(("plain", song.text, "yours"))
         elif f is not None:
-            out.append(("line" if f.tier == L.LINE else "plain", f.text, "found"))
+            out.append(("line" if f.tier == L.LINE else "plain", f.text, "found", f.require_audio_match))
         return out
 
     def start_timer(self):
@@ -494,11 +526,27 @@ class Run:
         except Exception:                                      # the helper process is gone: carry on with a thread
             self.timer = ThreadPoolExecutor(1)
             fut = self.timer.submit(decide.judge, feat, self.attempts(song))
-        fut.add_done_callback(lambda f, song=song: self.apply(song, f))
+        fut.add_done_callback(lambda f, song=song, feat=feat: self.apply(song, f, feat))
 
-    def apply(self, song, fut):
+    def apply(self, song, fut, feat=None):
         try:
-            self._apply(song, fut.result())
+            result = fut.result()
+            tried = []
+            # Failed online words can try another source using this SAME hearing. No extra GPU pass.
+            while (feat is not None and self.lyrics_client is not None and not self.opts.offline
+                   and not self.stop.is_set() and song.found is not None and not result["timed"]
+                   and result.get("last") and result["last"].get("lyrics") == "found"):
+                tried.append(song.found.provider)
+                if len(set(tried)) >= 2:
+                    break
+                alternative, note = fetch.lookup(self.lyrics_client, song, self.stop, skip=tried)
+                if alternative is None:
+                    break
+                song.found = alternative
+                result = decide.judge(feat, self.attempts(song))
+            if tried:
+                song.result["providers_retried"] = tried
+            self._apply(song, result)
             self.write_errors = 0
         except OSError as e:                                   # the lyrics file could not be created
             if self.stop.is_set():
@@ -524,7 +572,14 @@ class Run:
     def _apply(self, song, res):
         def named(info):
             info = dict(info)
-            info["lyrics_from"] = song.lyrics_from if info.get("lyrics") == "yours" else "lrclib.net record %s" % song.found.record
+            if info.get("lyrics") == "yours":
+                info["lyrics_from"] = song.lyrics_from
+            elif song.found.pinned:
+                info["lyrics_from"] = "%s (chosen page)" % song.found.provider
+            else:
+                info["lyrics_from"] = "%s record %s" % (song.found.provider, song.found.record)
+            if info.get("lyrics") == "found" and song.found.url:
+                info["lyrics_url"] = song.found.url
             return info
         if res["timed"]:
             info = named(res["timed"])
@@ -573,14 +628,20 @@ class Run:
         mine = {os.path.normcase(w["rel"]) for w in self.written}
         missing = sorted(r for r in before if r not in now)
         changed = sorted(r for r in before if r in now and tuple(before[r]) != now[r])
+        replaced=[]
+        for w in self.written:
+            if w.get("previous_sha256") and w["rel"] in changed:
+                if safe_files.sha256(os.path.join(self.source,w["rel"]))==w["sha256"]:
+                    replaced.append(w["rel"])
+        changed=[r for r in changed if r not in replaced]
         new = sorted(r for r in now if r not in before)
         foreign = [r for r in new if os.path.normcase(r) not in mine]
         lost = sorted(w["rel"] for w in self.written if w["rel"] not in now)
         self.check = {"files_before": len(before), "files_now": len(now), "missing": missing, "changed": changed,
                       "new_by_this_run": len(new) - len(foreign), "new_not_by_this_run": foreign, "written_but_gone": lost,
-                      "clean": not missing and not changed and not foreign and not lost}
+                      "retimed":replaced,"clean": not missing and not changed and not foreign and not lost}
         if self.check["clean"]:
-            stage.finish("nothing missing, nothing changed, %d new lyric files" % len(self.written))
+            stage.finish("original audio preserved; %d lyric files written, %d explicitly retimed" % (len(self.written),len(replaced)))
         else:
             stage.finish("see the report: %d missing, %d changed by another program, %d new files that are not from this run" % (
                 len(missing), len(changed), len(foreign)))
@@ -635,9 +696,15 @@ class Run:
             for s in self.songs:
                 if s.skip:
                     self.record(s, status="skipped", reason=s.skip)
-            todo_listen = [s for s in self.songs if not s.skip and s.tier == L.LINE]
-            todo_fetch = [s for s in self.songs if not s.skip and s.tier == L.PLAIN] + \
-                         [s for s in self.songs if not s.skip and s.tier in (L.NONE, L.INSTRUMENTAL)]
+            chosen_words=[s for s in self.songs if not s.skip and not s.lyrics_url and s.tier in (L.PLAIN,L.LINE) and
+                          (getattr(o,"lyrics_file",None) or (getattr(o,"redo",False) and getattr(o,"retime_mode","current")!="fresh"))]
+            for s in chosen_words:
+                if fetch.wants_uncensored(s) and fetch.censored(s.text):
+                    s.skip="current lyrics are censored; choose fresh lyrics or another source"
+                    self.record(s,status="not_timed",reason=s.skip)
+            direct=[s for s in chosen_words if not s.skip]
+            todo_listen = direct+[s for s in self.songs if not s.skip and s not in chosen_words and s.tier==L.LINE and not fetch.needs_lookup(s)]
+            todo_fetch = [s for s in self.songs if not s.skip and s not in chosen_words and fetch.needs_lookup(s)]
             ready = queue.Queue()
             for s in todo_listen:
                 self.enqueue(ready, s)
@@ -676,6 +743,9 @@ class Run:
                     self.record(s, status="not_reached", reason="the run was stopped before this song")
             self.final_check(st_check, before)
         finally:
+            if self.engine_loader is not None and self.engine_loader.is_alive():
+                self.stop.set()
+                self.engine_loader.join()
             sc.stop()
             self.log.close()
             for s in self.songs:

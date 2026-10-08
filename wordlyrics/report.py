@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import html
 import os
+import urllib.parse
 from datetime import datetime
 
 from . import __version__
@@ -15,7 +16,7 @@ GROUPS = [
     ("lines_only", "Line-timed lyrics written (no word timing)", "Lyrics were found and belong to the song, but too few lines could be heard clearly enough for word timing. The song got an ordinary line-timed .lrc file."),
     ("skipped", "Left alone", "Nothing to do for these songs."),
     ("not_timed", "Lyrics present, but could not be timed well enough", "Nothing was written for these. Their existing lyrics are untouched."),
-    ("no_lyrics", "No lyrics", "These songs have no lyrics and none could be found online with enough certainty."),
+    ("no_lyrics", "No usable lyrics found", "No usable lyric source was found for this run. Existing lyric files, if any, were preserved."),
     ("rejected", "Lyrics found online, but rejected", "The lyrics found did not match what is sung in the file, so nothing was written."),
     ("failed", "Could not be read", "The audio of these files could not be used."),
     ("not_reached", "Not reached", "The run was stopped before these songs. Run again to continue; finished songs are skipped."),
@@ -52,7 +53,7 @@ def summary_lines(run):
     out.append("  %5d  now have word-by-word lyrics from this run" % c.get("timed", 0))
     out.append("  %5d  already had word-by-word lyrics (left alone)" % already)
     for key, label in (("lines_only", "got line-timed lyrics only"), ("not_timed", "have lyrics that could not be timed well enough (nothing written)"),
-                       ("no_lyrics", "have no lyrics and none were found"), ("rejected", "had online lyrics rejected (did not match the recording)"),
+                       ("no_lyrics", "had no usable lyric source found (existing files preserved)"), ("rejected", "had online lyrics rejected (did not match the recording)"),
                        ("failed", "could not be read"), ("not_reached", "were not reached (run stopped early)")):
         if c.get(key):
             out.append("  %5d  %s" % (c[key], label))
@@ -65,7 +66,7 @@ def summary_lines(run):
         out.append("Backup copy: %s" % run.backup_rec["path"])
     if run.check:
         k = run.check
-        out.append("Check of the music folder: " + ("nothing missing, nothing changed; the only new files are the lyric files from this run."
+        out.append("Check of the music folder: " + ("original audio preserved; %d lyric files explicitly retimed; other new files are this run's lyrics." % len(k.get("retimed",[]))
                                                     if k["clean"] else "%d missing, %d changed, %d new files not from this run - see the report."
                                                     % (len(k["missing"]), len(k["changed"]), len(k["new_not_by_this_run"]))))
     for p in run.problems:
@@ -102,7 +103,7 @@ def write(run):
                     "confidence", "lyrics fit the recording", "files written", "note", "artist", "title", "length (s)"])
         for s in run.songs:
             r = s.result
-            w.writerow([s.rel, r.get("status", "not_reached"), L.TIER_NAME[s.tier], ORIGIN.get((r.get("mode"), r.get("lyrics")), ""),
+            w.writerow([s.rel, r.get("status", "not_reached"), L.TIER_NAME[s.previous_tier if s.previous_tier is not None else s.tier], ORIGIN.get((r.get("mode"), r.get("lyrics")), ""),
                         r.get("lyrics_from", s.lyrics_from), r.get("lines", ""), r.get("lines_word_timed", ""), r.get("lines_not_heard", ""),
                         r.get("confidence", ""), r.get("fits_recording", ""), " ".join(r.get("files", [])), r.get("reason", ""),
                         s.artist, s.title, round(s.seconds, 1) if s.seconds else ""])
@@ -137,18 +138,17 @@ def write(run):
             "every copied file read back and compared" if b["verified_byte_for_byte"] else "sizes compared"))
     if k:
         if clean:
-            h.append("<p>After the run the music folder was compared with how it was before: <b>no file is missing, no file was changed</b>, "
-                     "and the only new files are the %d lyric files written by this run.</p>" % len(run.written))
+            h.append("<p>After the run: <b>original audio preserved</b>, %d lyric files explicitly retimed after backup, "
+                     "and %d lyric files written in total.</p>" % (len(k.get("retimed",[])),len(run.written)))
         else:
-            h.append("<p>After the run the music folder was compared with how it was before. This tool only ever adds new lyric files, "
-                     "so the differences below come from something else (another program working in the folder, or you):</p><ul>")
+            h.append("<p>The differences below were not authorized lyric replacements by this run:</p><ul>")
             for key, label in (("missing", "no longer there"), ("changed", "changed (size or date)"), ("new_not_by_this_run", "new, not written by this run"),
                                ("written_but_gone", "written by this run but gone again")):
                 if k.get(key):
                     h.append("<li>%d %s: %s%s</li>" % (len(k[key]), label, ", ".join("<code>%s</code>" % e(x) for x in k[key][:15]),
                                                        " &hellip;" if len(k[key]) > 15 else ""))
             h.append("</ul>")
-    h.append("<p>Songs were only read. To take out everything this tool has written into the folder, run <code>WordLyrics.bat undo \"%s\"</code>; "
+    h.append("<p>Audio was only read. Retimed lyrics can be restored in the numbered menu. To take out new additions, run <code>WordLyrics.bat undo \"%s\"</code>; "
              "the files are moved into the tool's own folder, not deleted. The list of written files is in <code>%s</code>.</p></div>" % (
                  e(run.source), e(os.path.join(run.run_dir, "files written.csv"))))
     odd = [s for s in run.songs if s.result.get("lyrics") == "yours" and s.result.get("fits_recording") == "no"]
@@ -164,7 +164,12 @@ def write(run):
             continue
         h.append("<details%s><summary>%s <span>(%d)</span></summary><p class='dim'>%s</p><table>" % (
             " open" if key in ("not_timed", "rejected", "failed") and len(songs) <= 40 else "", e(title), len(songs), e(blurb)))
-        h += ["<tr><td>%s</td><td class='dim'>%s</td></tr>" % (e(s.rel), e(detail(s))) for s in sorted(songs, key=lambda s: s.rel.lower())]
+        for s in sorted(songs,key=lambda s:s.rel.lower()):
+            link=""
+            if key in ("no_lyrics","not_timed","rejected","failed"):
+                url="https://genius.com/search?"+urllib.parse.urlencode({"q":s.artist+" "+s.title})
+                link=" <a target='_blank' rel='noopener noreferrer' href='%s'>Find a Genius page</a>" % e(url,quote=True)
+            h.append("<tr><td>%s%s</td><td class='dim'>%s</td></tr>" % (e(s.rel),link,e(detail(s))))
         h.append("</table></details>")
     if run.problems:
         h.append("<div class='box attn'><h2>Notes</h2>%s</div>" % "".join("<p>%s</p>" % e(p) for p in run.problems))
