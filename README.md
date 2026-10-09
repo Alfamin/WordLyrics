@@ -97,13 +97,20 @@ Noctis by the installer. All that is left is to switch it on:
 Noctis keeps every new plugin switched off until you do this; the installer does not touch Noctis'
 settings.
 
-The same line also looks after two other Noctis plugins, each from its own repository:
+The same line also looks after three other Noctis plugins, each from its own repository:
 [Lyric Motion](https://github.com/Alfamin/LyricMotion) (animated lyrics) and
-[Free Music Finder](https://github.com/Alfamin/noctic-download-plugin) (finds and downloads songs). They
+[Free Music Finder](https://github.com/Alfamin/noctic-download-plugin) (finds and downloads songs), plus
+[True Shuffle](https://github.com/Alfamin/TrueShuffle) (equal-chance, no-repeat and discovery shuffle modes;
+Noctis 1.5.9 or newer). They
 are put into Noctis when they are missing and updated when a newer version is out; a plugin that is
 already up to date, or newer than the published one, is left alone. Their logins and settings are kept.
 Close Noctis before running the line, since Noctis holds its plugins' files while it is open. To leave
-the two out, set `$env:WORDLYRICS_NO_EXTRAS = '1'` first.
+the three out, set `$env:WORDLYRICS_NO_EXTRAS = '1'` first.
+
+True Shuffle adds a mode menu to Noctis's shuffle button. Choose **No repeats** for remembered cycles,
+**Discovery** for less-played songs first, or **Never played only**. The menu also offers playlist and
+whole-library sources and Noctis's normal shuffle. Installation does not enable it or change playback;
+approve and enable True Shuffle in Noctis first.
 
 The other way round (the plugin first): in Noctis choose **Install from file…** with
 `noctis-plugin\WordLyrics-for-Noctis.zip` from the WordLyrics folder

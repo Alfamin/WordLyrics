@@ -1,2 +1,5 @@
 # keep line ends exactly as stored: a .bat file must have Windows line ends
 * -text
+*.bat whitespace=cr-at-eol
+*.ps1 whitespace=cr-at-eol
+*.txt whitespace=cr-at-eol

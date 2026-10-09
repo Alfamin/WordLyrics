@@ -12,11 +12,12 @@
 #   $env:WORDLYRICS_NO_START = '1'                      install only, do not start
 #   $env:WORDLYRICS_SHORTCUT_DIR = 'D:\Tools'           put the shortcut there instead of on the desktop
 #   $env:WORDLYRICS_NO_NOCTIS = '1'                     do not put anything into the Noctis player
-#   $env:WORDLYRICS_NO_EXTRAS = '1'                     only the WordLyrics plugin, not the two others
+#   $env:WORDLYRICS_NO_EXTRAS = '1'                     only the WordLyrics plugin, not the three others
 #
-# If the Noctis music player is on this computer, three plugins are put into Noctis' plugins folder and
+# If the Noctis music player is on this computer, four plugins are put into Noctis' plugins folder and
 # kept up to date by running the line again: WordLyrics (times new songs by itself), Lyric Motion
-# (animated lyrics) and Free Music Finder (finds and downloads songs). Noctis keeps a new plugin switched
+# (animated lyrics), Free Music Finder (finds and downloads songs) and True Shuffle (shuffle modes).
+# Noctis keeps a new plugin switched
 # off until you switch it on in Settings -> Plugins.
 
 & {
@@ -42,7 +43,10 @@
             'https://raw.githubusercontent.com/Alfamin/LyricMotion/main/LyricMotion-for-Noctis.zip') },
         @{ Name = 'Free Music Finder'; Id = 'dev.moshi.freemusicfinder'; Urls = @(
             'https://github.com/Alfamin/noctic-download-plugin/raw/main/dist/FreeMusicFinder.zip',
-            'https://raw.githubusercontent.com/Alfamin/noctic-download-plugin/main/dist/FreeMusicFinder.zip') }
+            'https://raw.githubusercontent.com/Alfamin/noctic-download-plugin/main/dist/FreeMusicFinder.zip') },
+        @{ Name = 'True Shuffle'; Id = 'dev.moshi.trueshuffle'; Urls = @(
+            'https://github.com/Alfamin/TrueShuffle/raw/main/dist/TrueShuffle-for-Noctis.zip',
+            'https://raw.githubusercontent.com/Alfamin/TrueShuffle/main/dist/TrueShuffle-for-Noctis.zip') }
     )
     $noctis = $env:NOCTIS_DATA_DIR
     if (-not $noctis) { $noctis = Join-Path $env:APPDATA 'Noctis' }
@@ -60,6 +64,11 @@
             if (-not (Test-Path -LiteralPath $about)) { throw 'the plugin package is not complete' }
             $info = Get-Content -LiteralPath $about -Raw | ConvertFrom-Json
             if ($info.id -ne $wantId) { throw 'the plugin package is not the expected one' }
+            $entry = [string]$info.entry
+            if (-not $entry -or [IO.Path]::GetFileName($entry) -ne $entry -or $entry -notlike '*.dll' -or
+                -not (Test-Path -LiteralPath (Join-Path $unpacked $entry) -PathType Leaf)) {
+                throw 'the plugin package is missing its entry DLL'
+            }
             $pluginHome = Join-Path (Join-Path $noctis 'plugins') $wantId
             $old = $null
             $oldAbout = Join-Path $pluginHome 'plugin.json'
@@ -129,7 +138,7 @@
 
         New-Item -ItemType Directory -Force -Path (Join-Path $Dest 'wordlyrics') | Out-Null
         # the program's own files are replaced by the new ones; models, reports and the portable Python stay
-        foreach ($f in 'WordLyrics.bat', 'requirements.txt', 'README.md', 'LICENSE.txt') {
+        foreach ($f in 'WordLyrics.bat', 'requirements.txt', 'README.md', 'LICENSE.txt', 'lyrics-providers.example.json') {
             $p = Join-Path $src $f
             if (Test-Path -LiteralPath $p) { Copy-Item -LiteralPath $p -Destination (Join-Path $Dest $f) -Force }
         }
@@ -145,7 +154,7 @@
             # plugin switched off until you switch it on yourself; nothing in Noctis' settings is touched.
             if ($noctisThere) { $NoctisNotes += Add-ToNoctis 'WordLyrics' $plugin 'dev.moshi.wordlyrics' }
         }
-        # the two other Noctis plugins of the same family: fetched and brought up to date as well
+        # the three other Noctis plugins of the same family: fetched and brought up to date as well
         if ($noctisThere -and -not $env:WORDLYRICS_NO_EXTRAS) {
             foreach ($x in $Extras) {
                 $file = Join-Path $Work ($x.Id + '.zip')
@@ -197,7 +206,15 @@
         Write-Host " The installation did not finish: $($_.Exception.Message)"
         return
     } finally {
-        Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue
+        # Clean only this installer's own temporary directory, never a linked or unexpected path.
+        $fullWork = [IO.Path]::GetFullPath($Work)
+        $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\','/')
+        $workInfo = Get-Item -LiteralPath $fullWork -Force -ErrorAction SilentlyContinue
+        if ($workInfo -and [IO.Path]::GetDirectoryName($fullWork) -eq $tempRoot -and
+            [IO.Path]::GetFileName($fullWork) -match '^wordlyrics-install-[0-9a-f]{32}$' -and
+            -not ($workInfo.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            Remove-Item -LiteralPath $fullWork -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 
     Write-Host " Installed. To remove it later, delete the folder $Dest and the shortcut."
