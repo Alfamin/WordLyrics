@@ -12,8 +12,9 @@ a verified backup and successful timing checks.
 ## Install
 
 Nothing has to be installed first: no Python, no drivers, no administrator rights. You need 64-bit
-Windows 10 or 11, a graphics card (any brand), an internet connection for the first start, and about
+Windows 10 (1903 or newer) or 11, an internet connection for the first start, and about
 2.5 GB of free space.
+A supported graphics card speeds up timing; the processor is used when the GPU is unavailable or fails.
 
 **One line.** Open PowerShell (Start menu, type "PowerShell"), paste this, press Enter:
 
@@ -22,23 +23,44 @@ Windows 10 or 11, a graphics card (any brand), an internet connection for the fi
 It puts the program into a `WordLyrics` folder in your user folder, adds a "WordLyrics" shortcut to the
 desktop and starts it. Running the same line again later updates the program.
 
+If Noctis is missing, the installer offers **1 Download and install**, **2 Choose an existing Noctis.exe**,
+or **0 Continue with WordLyrics only**. The optional Windows installer comes from Noctis's official
+GitHub release, is checked against its known size and SHA-256 fingerprint, and installs for your user.
+Noctis download/setup failures are reported separately; they do not prevent WordLyrics installation.
+Noctis 1.5.9 is the tested installer version. Older players are offered an update; newer installations
+are not downgraded. The WordLyrics program also preserves a newer installed version, including a
+private friend build newer than the public repository.
+
 **Or by hand.** [Download the zip](https://github.com/Alfamin/WordLyrics/archive/refs/heads/main.zip),
 unpack it anywhere, double-click `WordLyrics.bat`.
 (Windows may ask whether to run a file from the internet: choose Run.)
 
 The first start sets itself up, inside its own folder only: a portable Python (12 MB), the packages
 (80 MB), and at the first run the two models (1.3 GB). That takes a few minutes and shows its progress.
-Every download has backup servers and continues where it stopped if the connection breaks; every file is
-checked against a known fingerprint before it is used. To remove WordLyrics, delete its folder and the
+Setup has backup servers and model downloads continue where supported. Python, pinned dependency
+packages, model files and the optional Noctis installer are checked against known fingerprints.
+To remove WordLyrics, delete its folder and the
 shortcut. That is all there is.
 
 ## Use
 
 1. Double-click **WordLyrics** (or drag your music folder onto it).
-2. Use the numbered menu to choose your library and action. Settings remembers your library, backup
-   folder, speed and online/offline preference inside the app folder.
-3. Check the selected songs and press **1 Start**. Leave it running. Individual failures are recorded
-   without asking you for a lyric page or other input. Open the report from menu **7** afterward.
+2. Choose **1 Generate missing timestamps**. One Noctis library folder is selected automatically.
+   With several folders, choose one, several by number, or **All folders**. This includes Telegram
+   download folders. You can choose another folder with **4 Choose music folders**.
+3. Generation starts after folder selection; there is no second hidden Start prompt. Leave it running.
+   The result counts actual word-timed songs and songs that need attention. **No new word timestamps
+   were written** is shown when none succeeded. Failures never pause the batch for a lyric page.
+
+An existing `.elrc` containing only plain/line lyrics is offered for **Repair after verified backup**.
+This replacement has a prominent confirmation; ordinary new-file generation starts directly.
+Player-specific `.lyricsfile` and `.ttml` files are reported as protected, with word timing unverified,
+rather than being counted as confirmed word timestamps.
+
+The main menu keeps Generate, Songs, Retry, Folders, Advanced, Connection checks, and Resume/fix jobs.
+Prominent **WORDLYRICS INPUT** prompts separate app choices from the shell prompt. Advanced holds
+selected-song reruns, source choices, full retiming, speed/offline options, setup and reports.
+Overlapping folders are deduplicated, and each selected folder keeps its own reports and backup history.
 
 The menu offers generation, lyric-status views, missing/failed retries, selected-song reruns, optional
 source choices, a complete-library rerun, reports and restoration, settings, and installation checks.
@@ -51,7 +73,7 @@ the accepted candidate and recovery record are saved before replacing the `.elrc
 keeps the original. A whole-library rerun asks for confirmation twice and can take hours.
 Existing `.ttml` and `.lyricsfile` files remain protected because those formats take priority in players.
 
-Menu **7 → 2** restores previous timing and archives the newer file. Restoration refuses to replace
+Menu **5 Advanced → 4 Reports → 2** restores previous timing and archives the newer file. Restoration refuses to replace
 a lyric file edited since the rerun or to use a damaged backup. **Undo new additions** handles newly
 created sidecars separately.
 
@@ -68,11 +90,15 @@ From a terminal:
     WordLyrics.bat check                              is everything installed, how fast is this computer
     WordLyrics.bat setup                              fetch the models now instead of at the first run
     WordLyrics.bat providers                          show which lyric sources are enabled
+    WordLyrics.bat diagnose                           connection checks and a shareable diagnostic file
     WordLyrics.bat source "D:\Music\Artist - Song.flac" "https://genius.com/Artist-song-lyrics"
 
 Other switches: `--speed full|half|light`, `--retry`, `--no-lrc`, `--quick-backup`, `--only TEXT`,
 `--limit N`, `--no-open`, `--plain-output`, and for other programs `--songs-from FILE` (a list of songs,
 one path per line) and `--result FILE` (what happened to each song, as JSON).
+`--progress FILE` writes live stages/counts for the Noctis plugin. Exit status **4** means the run ended
+with songs that still need word timing; **0** means no incomplete outcomes, **3** means another run is
+busy, and **130** means canceled. A skipped existing lyric file is explained in the report.
 `--retry` also asks the lyric sources again instead of reusing cached answers.
 Automation and the Noctis background worker continue to use `--yes`: no menu or per-song questions.
 Advanced selected-song reruns use `--redo --retime-mode current|guided|fresh --yes`; a selected-song
@@ -84,8 +110,10 @@ lyric text file for exactly one selected song.
 
 A small plugin for [Noctis](https://github.com/heartached/Noctis) (1.5.5 or newer, Windows) watches your
 library folders. When a song appears there (downloaded, copied, ripped, however it got there) the plugin
-waits until the file has been left alone for 20 seconds, then has WordLyrics time that one song in the
-background, without a window. A notice in Noctis says when it is done. A song takes a few seconds.
+waits until the file has been left alone (10 seconds for a new file, 2 seconds after a final rename),
+then has WordLyrics time the new songs in the background. A small **WordLyrics progress** window shows
+the current stage, measured stage progress, song count and errors. Timing speed depends on the song
+and computer. Closing the progress window keeps work running.
 
 If Noctis is on the computer when you install WordLyrics with the one line above, the plugin is put into
 Noctis by the installer. All that is left is to switch it on:
@@ -127,7 +155,67 @@ What else it does:
 - It stops with Noctis. Closing Noctis in the middle stops the work; the songs not reached wait for
   the next start. If WordLyrics is busy in its own window, the plugin waits for it.
 - Its settings: on/off, how hard the computer works (half by default), notices, the backup folder, the
-  WordLyrics folder, and a switch that opens WordLyrics on the whole library.
+  WordLyrics folder, **Generate timestamps / choose music folders**, **Open progress and last result**,
+  and whether progress opens automatically. Missing setup offers a direct **Set up WordLyrics** button.
+
+## When something does not work
+
+**Progress is saved, including when access fails before songs can be scanned.** Choose
+**7 Resume / fix unfinished jobs**, or **Fix problem / resume affected songs** in the Noctis progress
+window. It shows the remaining songs and reasons, and offers Retry, permission repair, different
+lyrics, a different backup folder, or connection checks. Completed word timestamps are kept; retries
+use only affected songs and newly accessible parts of the originally selected scope.
+
+Permission repair shows its exact targets and asks for **Windows UAC administrator approval**.
+Only a fixed helper is elevated; the lyric model keeps running as the original user. The rule is for
+that user even if a different administrator approves. Audio files receive read access; selected music
+folders receive Modify for sidecar creation. Ownership and other users' rules stay in place. A read-only
+`.elrc` can be unlocked for an explicitly requested repair. Successful fixes continue the saved scope;
+canceling UAC keeps the job saved. The helper refuses system directories, whole profiles, drive roots,
+linked paths and remote shares; it does not remove deny rules or grant Everyone/FullControl.
+
+Recovery is bounded: providers/mirrors are tried in order, recent positive cached provider data may
+be used during connection failure (the usual matching/censorship/audio checks still apply), GPU failures
+fall back to CPU, and damaged private packages get one repair attempt. Failed model loading triggers
+hash checks; only missing/damaged known models are restored, preserving damaged copies. Global Python,
+security policies, antivirus settings and drivers are not modified. A valid model that this hardware
+cannot load remains a clearly reported blocker; incorrect word timestamps are never invented.
+
+Choose **6 Check connections & setup**. It tests LRCLIB and enabled Genius separately and writes
+`diagnostics.json` in the app folder. That file contains versions, model readiness and provider codes,
+without credentials, lyrics, phone numbers or music paths. Send that file when asking for help.
+
+The run report lists each song's reason: missing artist/title, unreadable audio, no matching lyrics,
+censored sources rejected, timing quality too low, existing files protected, or a provider failure.
+Connection failures use codes such as `DNS_FAILED`, `TIMEOUT`, `TLS_FAILED`, `HTTP_403`, `RATE_LIMIT`
+and `SERVER_ERROR`. A blocked provider is stopped for that batch instead of repeatedly waiting on it;
+other sources and existing usable lyrics can still work. **Retry** checks again on a new run.
+The models load only when a song has usable lyrics ready for timing; no-lyric runs avoid that download/load.
+Noctis's last result and startup output are kept in its WordLyrics plugin-data folder.
+
+Tests simulate Windows 10/11 version boundaries, standard users, a different approving administrator,
+denied/read-only/disconnected targets, canceled or tampered permission requests, failed GPU/CPU tests,
+broken packages/models, stale caches and interrupted jobs. CI is configured for Windows Server 2022
+and 2025 runners. These are not a claim of actual desktop Windows 10/11 VM coverage or guaranteed
+compatibility with every computer.
+
+## Private setup for friends
+
+The public program and plugin contain no shared Telegram API hash. A private deployment can supply
+`telegram-defaults.private.json` through `WORDLYRICS_TELEGRAM_DEFAULTS_FILE`. The installer validates
+it and puts it in Noctis's Free Music Finder **plugin-data** folder. Existing private defaults and
+saved logins are preserved. Free Music Finder 2.4.0 or newer then starts with phone-number login;
+**Advanced: Telegram API settings** lets each person override the defaults. Rejected credentials
+have a specific error and instructions. Each person still supplies their own Telegram code and,
+when enabled, their two-step password. No account session is shared.
+
+A private friend bundle may also supply local program/Finder ZIPs via `WORDLYRICS_PACKAGE` and
+`WORDLYRICS_FINDER_PACKAGE`, so it uses the supplied versions before those versions are published.
+`WORDLYRICS_EXTRAS_DIR` supplies other local ZIPs named by plugin id; the friend bundle can include
+all four plugins and avoid GitHub downloads for the program/plugins themselves.
+Keep bundles/configuration with real defaults out of public repositories and public download links.
+For unattended installs, set `WORDLYRICS_NONINTERACTIVE=1` to skip the optional Noctis question.
+`WORDLYRICS_INSTALL_NOCTIS=1` explicitly requests the tested Noctis installer without prompting.
 
 The plugin does no lyric work itself and never touches a song: it starts WordLyrics on exactly the new
 songs. Everything said on this page about safety holds; of a new song only that song and the lyric files

@@ -14,7 +14,10 @@ concurrency:
 
 jobs:
   windows:
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -31,3 +34,9 @@ jobs:
       - name: Test installer without downloads or launching models
         shell: pwsh
         run: ./tests/test_installer.ps1
+      - name: Test Noctis setup and private-default delivery without network
+        shell: pwsh
+        run: ./tests/test_setup.ps1
+      - name: Test targeted permission helper without elevation or ACL writes
+        shell: pwsh
+        run: ./tests/test_permissions.ps1

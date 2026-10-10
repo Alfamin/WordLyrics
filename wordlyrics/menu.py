@@ -1,5 +1,5 @@
 """Numbered terminal controls. Batch work never asks for help with individual failures."""
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor,as_completed
 import json
 import os
 from pathlib import Path
@@ -9,13 +9,13 @@ import urllib.parse
 import uuid
 import webbrowser
 
-from . import __version__,backup,files,library as L,rerun
+from . import __version__,backup,files,folders,library as L,rerun,resume
 from .pipeline import library_home
 from .sources import genius_song_url
-from .ui import duration
+from .ui import duration, _enable_ansi
 
 DIGITS=str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩،","01234567890123456789,")
-FAILURES={"no_lyrics","not_timed","rejected","failed","not_reached"}
+FAILURES={"no_lyrics","network_error","not_timed","rejected","failed","not_reached","lines_only"}
 
 
 def selection(text,count):
@@ -64,11 +64,17 @@ class Menu:
         self.initial=[]
         self.catalog=None
         self.preferences=self.home/"menu-settings.json"
+        self.selected_roots=[]
+        self.origin={}
+        self.folder_notes=[]
+        self.scan_unreadable={}
+        self.color=writer is None and _enable_ansi() and not os.environ.get("NO_COLOR")
         try:
             data=json.loads(self.preferences.read_text(encoding="utf-8"))
             for key in self.state:
                 if isinstance(data.get(key),type(self.state[key])):
                     self.state[key]=data[key]
+            self.selected_roots=[p for p in data.get("libraries",[]) if isinstance(p,str) and not folders.usable(p)[1]]
         except (OSError,ValueError,AttributeError):
             pass
         if self.state["speed"] not in ("full","half","light"):
@@ -79,14 +85,42 @@ class Menu:
             if options.backup_to:self.state["backup"]=options.backup_to
         if len(initial)==1 and os.path.isdir(initial[0]):
             self.state["library"]=os.path.abspath(initial[0])
+            self.selected_roots=[self.state["library"]]
+        elif initial and all(os.path.isdir(p) for p in initial):
+            self.selected_roots=folders.unique(initial)
+            self.state["library"]=self.selected_roots[0]
         elif initial:
             self.initial=[os.path.abspath(p) for p in initial if os.path.isfile(p)]
             if self.initial:
                 self.state["library"]=os.path.dirname(self.initial[0])
+                self.selected_roots=[self.state["library"]]
+        elif not self.selected_roots:
+            found,self.folder_notes=folders.discover()
+            if len(found)==1:
+                self.selected_roots=found
+                self.state["library"]=found[0]
+            elif len(found)>1:
+                self.state["library"]=""
+            elif self.state["library"] and not folders.usable(self.state["library"])[1]:
+                self.selected_roots=[self.state["library"]]
+        elif not initial:
+            found,notes=folders.discover()
+            self.folder_notes.extend(notes)
+            more=[p for p in found if not any(backup.inside(p,selected) for selected in self.selected_roots)]
+            if more:self.folder_notes.append("Noctis has %d other folder%s. Choose 4 to include them." % (len(more),"" if len(more)==1 else "s"))
 
-    def ask(self,prompt):
+    def panel(self,title,body=""):
+        line="="*64
+        heading="\n%s\n  %s\n%s" % (line,title,line)
+        self.say(("\033[1;36m"+heading+"\033[0m") if self.color else heading)
+        if body:self.say(body)
+
+    def ask(self,prompt,numbers=True):
         try:
-            return self.read(prompt).strip().translate(DIGITS)
+            label="\n  WORDLYRICS INPUT  |  " + (prompt if prompt!="> " else "Type an option number, then Enter")
+            self.say(("\033[1;33m"+label+"\033[0m") if self.color else label)
+            value=self.read("  WordLyrics > ").strip()
+            return value.translate(DIGITS) if numbers or value in ("۰","٠") else value
         except (EOFError,KeyboardInterrupt):
             return "0"
 
@@ -94,46 +128,112 @@ class Menu:
         self.home.mkdir(parents=True,exist_ok=True)
         temp=self.home/(".menu-settings-"+uuid.uuid4().hex+".tmp")
         with temp.open("x",encoding="utf-8") as f:
-            json.dump(self.state,f)
+            json.dump(dict(self.state,libraries=self.selected_roots),f)
         os.replace(temp,self.preferences)
 
+    def choose_folders(self):
+        found,notes=folders.discover()
+        self.panel("CHOOSE MUSIC FOLDERS")
+        for note in notes:self.say(note)
+        if found:
+            self.say("  [1] All %d Noctis folders" % len(found))
+            for i,p in enumerate(found,2):self.say("  [%d] %s" % (i,p))
+            custom=len(found)+2
+            self.say("  [%d] Choose another folder\n  [0] Back" % custom)
+            raw=self.ask("Choose folders (one number, or numbers such as 2,3): ")
+            if raw=="0":return []
+            if raw=="1":chosen=found
+            elif raw==str(custom):chosen=[]
+            else:
+                try:
+                    indices=selection(raw,len(found)+1)
+                    if 0 in indices:raise ValueError("Use 1 alone for all folders.")
+                    chosen=[found[i-1] for i in indices]
+                except (ValueError,IndexError):self.say("Choose the displayed folder numbers.");return []
+                if not chosen:return []
+        else:chosen=[]
+        if not chosen:
+            raw=self.ask("Drop/type a music folder path (0 back): ",numbers=False).strip('"')
+            if raw=="0":return []
+            path,error=folders.usable(raw)
+            if error:self.say(error);return []
+            chosen=[path]
+        self.selected_roots=folders.unique(chosen)
+        self.state["library"]=self.selected_roots[0]
+        self.catalog=None
+        self.origin={}
+        self.save()
+        return self.selected_roots
+
+    def roots(self):
+        if not self.selected_roots:
+            if self.state["library"] and not folders.usable(self.state["library"])[1]:
+                self.selected_roots=[self.state["library"]]
+            else:return self.choose_folders()
+        good=[]
+        for p in self.selected_roots:
+            root,error=folders.usable(p)
+            if error:self.say("%s: %s" % (root,error))
+            else:good.append(root)
+        if not good:
+            self.selected_roots=[]
+            return self.choose_folders()
+        return folders.unique(good)
+
     def root(self):
-        root=self.state["library"]
-        if not root or not os.path.isdir(root) or os.path.islink(root) or L._is_junction(root) or drive_root(root):
-            raw=self.ask("Music folder (drop/type its path; 0 back): ")
-            if raw=="0":return None
-            root=os.path.abspath(os.path.expanduser(raw.strip('"')))
-            if not os.path.isdir(root) or os.path.islink(root) or L._is_junction(root) or drive_root(root):
-                self.say("Choose a music folder, rather than an entire drive or a link.")
-                return None
-            self.state["library"]=root
-            self.catalog=None
-            self.save()
-        return root
+        roots=self.roots()
+        if not roots:return None
+        if len(roots)==1:return roots[0]
+        self.panel("CHOOSE A FOLDER FOR REPORTS / RESTORE")
+        for i,p in enumerate(roots,1):self.say("  [%d] %s" % (i,p))
+        try:
+            selected=selection(self.ask("Folder number (0 back): "),len(roots))
+            return roots[selected[0]] if len(selected)==1 else None
+        except ValueError as e:self.say(str(e));return None
 
     def scan(self,refresh=False):
-        root=self.root()
-        if root is None:return []
+        roots=self.roots()
+        if not roots:return []
         if self.catalog is not None and not refresh:return self.catalog
-        self.say("Reading song names and lyric status; no models or online lookups.")
-        entries,_=L.walk(root,[str(self.home)])
-        audio=[f for f in entries if Path(f[0]).suffix.lower() in L.AUDIO_EXT]
+        self.panel("SCANNING YOUR MUSIC", "Reading song names and lyric status. No AI or online searches yet.")
+        audio=[]
+        self.origin={}
+        self.scan_unreadable={}
+        for root in roots:
+            unreadable=[]
+            entries,links=L.walk(root,[str(self.home)],unreadable)
+            found=[f for f in entries if Path(f[0]).suffix.lower() in L.AUDIO_EXT]
+            audio.extend(found)
+            for entry in found:self.origin[entry[0]]=root
+            self.say("  %d songs  |  %s" % (len(found),root))
+            if unreadable:
+                self.say("  Cannot read: "+", ".join(unreadable[:5]))
+                self.scan_unreadable[root]=unreadable
+            if links:self.say("  %d linked files/folders were left alone." % len(links))
         def read(item):
             path,rel,size,_=item
             try:
                 return L.read_song(path,rel,size,redo=True,retime_mode="guided")
             except Exception as e:
                 s=L.Song(path=path,rel=rel,size=size)
-                s.skip="unreadable ("+type(e).__name__+")"
+                from .recovery import permission_error
+                if permission_error(e):s.result["preflight_error"]="PERMISSION_DENIED: access is needed before this song can be checked"
+                else:s.skip="unreadable ("+type(e).__name__+")"
                 return s
         with ThreadPoolExecutor(4) as pool:
-            self.catalog=sorted(pool.map(read,audio),key=lambda s:s.rel.casefold())
+            results=[]
+            pending=[pool.submit(read,item) for item in audio]
+            for n,future in enumerate(as_completed(pending),1):
+                results.append(future.result())
+                if n%50==0 or n==len(audio):self.say("  Reading names/status: %d / %d" % (n,len(audio)))
+            self.catalog=sorted(results,key=lambda s:s.rel.casefold())
         L.group_same_name(self.catalog)
+        self.say("\nFound %d songs across %d folder%s." % (len(self.catalog),len(roots),"" if len(roots)==1 else "s"))
         return self.catalog
 
     def status(self,s):
         tier=s.previous_tier if s.previous_tier is not None else s.tier
-        return s.skip or L.TIER_NAME[tier]
+        return s.skip or s.result.get("preflight_error") or L.TIER_NAME[tier]
 
     def choose(self,songs):
         if not songs:
@@ -143,7 +243,8 @@ class Menu:
             start=page*25
             self.say("\nSongs %d–%d of %d" % (start+1,min(start+25,len(shown)),len(shown)))
             for i,s in enumerate(shown[start:start+25],start+1):
-                self.say("%4d  %s  [%s]" % (i,s.rel,self.status(s)))
+                location=(Path(self.origin.get(s.path,"music")).name+" / ") if len(self.selected_roots)>1 else ""
+                self.say("%4d  %s%s  [%s]" % (i,location,s.rel,self.status(s)))
             self.say("1 Select numbers   2 Next page   3 Previous page   4 Search   5 Select this entire view   0 Back")
             pick=self.ask("> ")
             if pick=="0":return []
@@ -153,30 +254,43 @@ class Menu:
             elif pick=="2":page=min(page+1,(len(shown)-1)//25)
             elif pick=="3":page=max(0,page-1)
             elif pick=="4":
-                term=self.ask("Name contains (empty resets): ").casefold()
+                term=self.ask("Name contains (empty resets): ",numbers=False).casefold()
                 shown=[s for s in songs if term in s.rel.casefold()] if term else list(songs)
                 if not shown:self.say("No matches.");shown=list(songs)
                 page=0
             elif pick=="5":return shown
 
     def history(self):
-        root=self.root()
         result={}
-        if root is None:return result
-        for log in sorted(Path(library_home(str(self.home),root)).glob("run */log.jsonl")):
-            try:
-                with log.open(encoding="utf-8") as f:
-                    for line in f:
-                        r=json.loads(line)
-                        if isinstance(r,dict) and isinstance(r.get("song"),str):result[r["song"]]=r
-            except (OSError,ValueError,TypeError):continue
+        for root in self.roots():
+            for log in sorted(Path(library_home(str(self.home),root)).glob("run */log.jsonl")):
+                try:
+                    with log.open(encoding="utf-8") as f:
+                        for line in f:
+                            r=json.loads(line)
+                            if isinstance(r,dict) and isinstance(r.get("song"),str):result[os.path.join(root,r["song"])]=r
+                except (OSError,ValueError,TypeError):continue
         return result
+
+    def prior(self,history,song):
+        return history.get(song.path,history.get(song.rel,{})).get("status")
 
     def job(self,songs,redo=False,whole=False,lyrics_file=None,mode_hint=None):
         if lyrics_file:
             songs=[L.read_song(s.path,s.rel,s.size,redo=True,lyrics_file=lyrics_file) for s in songs]
         songs=[s for s in songs if not s.skip]
-        if not songs:self.say("No eligible songs selected.");return
+        if not songs:self.panel("NOTHING TO START", "No eligible songs selected. Use Songs to see skip reasons, or Advanced > Rerun to replace protected .elrc timing.");return
+        repair_paths=set()
+        if not redo:
+            damaged=[s for s in songs if s.retime_path and s.previous_tier!=L.WORD]
+            if damaged:
+                self.panel("EXISTING FILES NEED WORD TIMING", "%d .elrc files contain plain/line lyrics rather than word timestamps. Repair requires replacing those files after a verified backup." % len(damaged))
+                self.say("  [1] Repair these files and generate other missing timestamps\n  [2] Leave these files alone; generate the others\n  [0] Cancel")
+                choice=self.ask("> ")
+                if choice=="1":repair_paths={s.path for s in damaged}
+                elif choice=="2":songs=[s for s in songs if s not in damaged]
+                else:return
+                if not songs:self.say("No other songs need processing. Existing files were left alone.");return
         mode="current"
         if redo and mode_hint is not None:
             mode=mode_hint
@@ -185,19 +299,23 @@ class Menu:
             pick=self.ask("> ")
             if pick not in ("1","2","3"):return
             mode={"1":"current","2":"guided","3":"fresh"}[pick]
-        self.say("\nSelected: %d songs; %s of audio. Speed: %s." % (len(songs),duration(sum(s.seconds for s in songs)),self.state["speed"]))
+        self.panel("READY TO %s" % ("RERUN" if redo else "GENERATE TIMESTAMPS"), "Selected: %d songs; %s of audio. Speed: %s." % (len(songs),duration(sum(s.seconds for s in songs)),self.state["speed"]))
         self.say("Only these songs and their sidecars are backed up. Audio/tags are never changed.")
         if redo:self.say("Existing .elrc timing will be replaced only after a verified backup and successful checks. Failed results keep the original.")
-        self.say("1 Start   0 Cancel")
-        if self.ask("> ")!="1":return
+        if redo:
+            self.say("\n  [1] START RERUN\n  [0] CANCEL - leave everything as it is\n")
+            if self.ask("> ")!="1":return
+        else:self.say("Starting now. Ctrl+C stops safely; completed songs are kept.")
         if whole:
             self.say("This reruns the entire eligible library, including existing Enhanced LRC. It can take hours.")
             if self.ask("Are you completely sure? 1 Yes, redo library   0 Cancel: ")!="1":return
         groups={}
         for s in songs:
-            groups.setdefault(os.path.splitdrive(os.path.abspath(s.path))[0],[]).append(s.path)
-        for paths in groups.values():
-            root=self.state["library"]
+            root=self.origin.get(s.path) or self.state["library"]
+            if not root or not backup.inside(s.path,root):root=os.path.dirname(s.path)
+            groups.setdefault((root,s.path in repair_paths),[]).append(s.path)
+        total_timed=total_attention=0
+        for (root,repair),paths in groups.items():
             if not root or not all(backup.inside(p,root) for p in paths):
                 root=os.path.commonpath([os.path.dirname(p) for p in paths])
             # A list file avoids Windows command-length limits, and keeps report/restore
@@ -206,18 +324,34 @@ class Menu:
             chosen.parent.mkdir(parents=True,exist_ok=True)
             files.create_new(chosen,("\n".join(paths)+"\n").encode("utf-8"))
             args=[root,"--songs-from",str(chosen),"--yes","--speed",self.state["speed"],"--no-open"]
+            result=chosen.with_suffix(".result.json")
+            args += ["--result",str(result)]
             if self.state["backup"]:args += ["--backup-to",self.state["backup"]]
             if self.state["offline"]:args.append("--offline")
-            if redo:args += ["--redo","--retime-mode",mode,"--confirm-redo"]
+            if redo or repair:args += ["--redo","--retime-mode",mode,"--confirm-redo"]
             else:args.append("--retry")
             if lyrics_file:args += ["--lyrics-file",lyrics_file]
             code=self.execute(args)
-            self.say("Run finished (status %s). Failures were recorded without waiting for input." % code)
+            try:
+                data=json.loads(result.read_text(encoding="utf-8"))
+                summary=data["summary"]
+                self.panel("RESULT", summary["message"])
+                total_timed += summary["timed"]
+                total_attention += summary["needs_attention"]
+                if data.get("error"):self.say(data["error"])
+                if data.get("exit_code"):
+                    self.say("Your progress is saved. Choose 7 Resume / fix unfinished jobs to fix a problem and retry only affected songs.")
+                report_path=Path(data.get("run_folder", ""))/"report.html"
+                self.say("Report: "+str(report_path))
+            except (OSError,ValueError,KeyError,TypeError):
+                self.panel("RESULT", "The run returned status %s. No result summary was available; read the messages above. Success has not been confirmed." % code)
+                if code:total_attention += len(paths)
             if code==130:break
+        if len(groups)>1:self.panel("ALL SELECTED FOLDERS", "%d songs received word timestamps; %d need attention." % (total_timed,total_attention))
         self.catalog=None
 
     def dropped(self):
-        raw=self.ask("Drop selected audio files here (0 back): ")
+        raw=self.ask("Drop selected audio files here (0 back): ",numbers=False)
         if raw=="0":return []
         try:
             paths=dropped_files(raw)
@@ -235,10 +369,10 @@ class Menu:
         else:return
         self.job(songs,redo=True)
 
-    def source_choice(self):
+    def source_choice(self,eligible=None):
         history=self.history()
-        all_songs=self.scan()
-        failed=[s for s in all_songs if history.get(s.rel,{}).get("status") in FAILURES or
+        all_songs=self.scan() if eligible is None else eligible
+        failed=[s for s in all_songs if self.prior(history,s) in FAILURES or
                 (s.previous_tier if s.previous_tier is not None else s.tier) in (L.NONE,L.PLAIN)]
         self.say("1 Missing/failed songs   2 Any song   0 Back")
         pick=self.ask("> ")
@@ -246,17 +380,19 @@ class Menu:
         chosen=self.choose(failed if pick=="1" else all_songs)
         if len(chosen)!=1:self.say("Choose one song for a lyric source.");return
         s=chosen[0]
+        if eligible is not None:
+            s=L.read_song(s.path,s.rel,os.path.getsize(s.path),redo=True,retime_mode="guided")
         self.say("1 Paste a Genius page   2 Choose a lyric text file   3 Open Genius search   4 Use automatic search again   0 Back")
         action=self.ask("> ")
         if action=="3":
             webbrowser.open("https://genius.com/search?"+urllib.parse.urlencode({"q":s.artist+" "+s.title}));return
         if action=="2":
-            path=self.ask("Lyric text file (0 back): ").strip('"')
+            path=self.ask("Lyric text file (0 back): ",numbers=False).strip('"')
             if path=="0":return
             if not os.path.isfile(path) or os.path.islink(path):self.say("Choose an existing text file.");return
             self.job([s],redo=True,lyrics_file=os.path.abspath(path),mode_hint="current");return
         if action not in ("1","4"):return
-        url="auto" if action=="4" else genius_song_url(self.ask("Genius song URL (0 back): "))
+        url="auto" if action=="4" else genius_song_url(self.ask("Genius song URL (0 back): ",numbers=False))
         if not url:self.say("That is not a public Genius song page.");return
         target=Path(s.base+".lyrics-source.txt")
         data=(url+"\r\n").encode("utf-8")
@@ -307,9 +443,9 @@ class Menu:
     def settings(self):
         self.say("1 Change library   2 Backup folder   3 Speed   4 Online/offline   5 Provider status   0 Back")
         pick=self.ask("> ")
-        if pick=="1":self.state["library"]="";self.root()
+        if pick=="1":self.choose_folders()
         elif pick=="2":
-            raw=self.ask("Backup folder (empty = automatic; 0 back): ")
+            raw=self.ask("Backup folder (empty = automatic; 0 back): ",numbers=False)
             if raw!="0":self.state["backup"]=os.path.abspath(os.path.expanduser(raw.strip('"'))) if raw else ""
         elif pick=="3":
             choice=self.ask("1 Full   2 Half   3 Light   0 Back: ")
@@ -320,16 +456,91 @@ class Menu:
         elif pick=="5":self.execute(["providers"])
         self.save()
 
+    def advanced(self):
+        self.panel("ADVANCED", "  [1] Rerun selected songs\n  [2] Choose a lyric source\n  [3] Redo all selected folders\n  [4] Reports / backups / restore\n  [5] Speed / offline / backup settings\n  [6] Check installation\n  [7] Download / set up AI models\n  [8] Connection & setup diagnostics\n  [0] Back")
+        pick=self.ask("> ")
+        if pick=="1":self.retime_selected()
+        elif pick=="2":self.source_choice()
+        elif pick=="3":self.job(self.scan(),redo=True,whole=True)
+        elif pick=="4":self.reports()
+        elif pick=="5":self.settings()
+        elif pick in ("6","7","8"):self.execute([{ "6":"check","7":"setup","8":"diagnose"}[pick]])
+
+    def resume_job(self,run_dir):
+        code=0
+        while True:
+            try:data,rows=resume.pending(str(self.home),run_dir)
+            except (OSError,ValueError) as e:self.panel("SAVED JOB NEEDS ATTENTION",str(e));return 1
+            if not rows:self.panel("THIS JOB IS COMPLETE", "No unfinished songs remain. Completed word timestamps were kept.");return 0
+            self.selected_roots=[data["source"]];self.state["library"]=data["source"]
+            folders_waiting=sum(bool(row.get("folder")) for row in rows)
+            self.panel("NEEDS ACTION - YOUR PROGRESS IS SAVED", "%d unfinished songs; %d folders still need scanning. Completed songs will not be processed again." % (len(rows)-folders_waiting,folders_waiting))
+            for row in rows[:8]:self.say("  %s: %s" % (Path(row["path"]).name,row["reason"]))
+            if len(rows)>8:self.say("  ... %d more songs; see the full result report." % (len(rows)-8))
+            self.say("\n  [1] Retry affected songs now\n  [2] Fix music-folder permissions (Windows administrator approval)\n  [3] Choose lyrics for an affected song\n  [4] Retry with fresh lyrics\n  [5] Choose another backup folder and continue\n  [6] Check connections & setup\n  [0] Return - keep this job saved\n")
+            pick=self.ask("> ")
+            if pick=="0":return code
+            try:
+                if pick in ("1","4"):
+                    code=resume.submit(str(self.home),run_dir,self.execute,fresh=pick=="4")
+                elif pick=="2":
+                    from . import permissions
+                    try:
+                        outcome=json.loads((Path(run_dir)/"outcome.json").read_text(encoding="utf-8"))
+                        targets=outcome.get("permission_targets") or [data["source"]]
+                    except (OSError,ValueError):targets=[data["source"]]
+                    targets=permissions.plan(targets,data["source"])
+                    self.panel("PERMISSION FIX", "Windows will request administrator approval. Only the listed local targets are changed for your current Windows user. Audio bytes and other users' rules/ownership are preserved.")
+                    for target in targets:self.say("  "+target)
+                    if self.ask("1 Request administrator approval   0 Cancel: ")=="1":
+                        repaired=permissions.repair(str(self.home),data["source"],targets,detailed=True)
+                        self.say(repaired["message"])
+                        if repaired["ok"]:code=resume.submit(str(self.home),run_dir,self.execute)
+                elif pick=="3":
+                    songs=[L.Song(row["path"],os.path.relpath(row["path"],data["source"])) for row in rows if not row.get("folder")]
+                    if not songs:self.say("Fix folder access or reconnect the drive before choosing song lyrics.");continue
+                    self.origin={s.path:data["source"] for s in songs}
+                    self.source_choice(songs)
+                elif pick=="5":
+                    place=self.ask("New backup folder (0 cancel): ",numbers=False).strip('"')
+                    if place and place!="0":code=resume.submit(str(self.home),run_dir,self.execute,backup_to=os.path.abspath(place))
+                elif pick=="6":self.execute(["diagnose"])
+            except (OSError,ValueError) as e:self.say(str(e)+" Your progress is still saved.")
+
+    def unfinished(self):
+        jobs=[]
+        for request in sorted((self.home/"runs").glob("*/run */request.json"),key=lambda p:p.parent.name,reverse=True):
+            try:
+                _,rows=resume.pending(str(self.home),str(request.parent))
+                if rows:jobs.append((request.parent,len(rows)))
+            except (OSError,ValueError):continue
+        if not jobs:self.panel("NO UNFINISHED SAVED JOBS");return
+        self.panel("RESUME / FIX AN UNFINISHED JOB")
+        for i,(path,count) in enumerate(jobs[:30],1):self.say("  [%d] %s | %s | %d unfinished items" % (i,path.parent.name,path.name,count))
+        try:
+            indices=selection(self.ask("Job number (0 back): "),min(len(jobs),30))
+            if len(indices)==1:self.resume_job(str(jobs[indices[0]][0]))
+        except ValueError as e:self.say(str(e))
+
     def run(self):
         while True:
-            self.say("\nWordLyrics %s — %s" % (__version__,self.state["library"] or "choose a music folder"))
-            self.say("1 Generate missing word timing\n2 Browse lyric status\n3 Retry missing/failed songs\n4 Rerun selected songs\n5 Choose lyrics for a song (optional)\n6 Redo the whole library\n7 Reports, backups and restore\n8 Settings\n9 Check installation / setup\n0 Exit")
+            self.panel("WORDLYRICS %s" % __version__, "Word-by-word lyrics for your music")
+            for p in self.selected_roots:self.say("  Music: "+p)
+            if not self.selected_roots:self.say("  Music folders will be detected from Noctis when you start.")
+            for note in self.folder_notes:self.say("  "+note)
+            self.folder_notes=[]
+            self.say("\n  [1] GENERATE MISSING TIMESTAMPS\n  [2] Songs & lyric status\n  [3] Retry songs that need attention\n  [4] Choose music folders\n  [5] Advanced / reports / restore\n  [6] Check connections & setup\n  [7] Resume / fix unfinished jobs\n  [0] Exit\n")
             pick=self.ask("> ")
             if pick=="0":return 0
             try:
                 if pick=="1":
                     songs=[s for s in self.scan() if (s.previous_tier if s.previous_tier is not None else s.tier)!=L.WORD]
                     self.job(songs)
+                    if not songs and self.scan_unreadable:
+                        for root in self.scan_unreadable:
+                            self.panel("SAVING THE BLOCKED JOB", "This folder cannot be read. The saved job will let you request a permission fix and resume.")
+                            self.execute([root,"--yes","--retry","--no-open"])
+                        self.say("Choose 7 Resume / fix unfinished jobs to fix access and continue.")
                 elif pick=="2":
                     songs=self.scan()
                     choice=self.ask("1 All   2 No lyrics   3 Plain/line lyrics   4 Word timing   0 Back: ")
@@ -340,18 +551,14 @@ class Menu:
                     if selected:self.job(selected,redo=True)
                 elif pick=="3":
                     history=self.history()
-                    songs=[s for s in self.scan() if history.get(s.rel,{}).get("status") in FAILURES or
-                           (s.previous_tier if s.previous_tier is not None else s.tier) in (L.NONE,L.PLAIN)]
+                    songs=[s for s in self.scan() if self.prior(history,s) in FAILURES or
+                           (s.previous_tier if s.previous_tier is not None else s.tier) in (L.NONE,L.PLAIN,L.LINE)]
                     selected=self.choose(songs)
                     if selected:self.job(selected,redo=True,mode_hint="fresh")
-                elif pick=="4":self.retime_selected()
-                elif pick=="5":self.source_choice()
-                elif pick=="6":self.job(self.scan(),redo=True,whole=True)
-                elif pick=="7":self.reports()
-                elif pick=="8":self.settings()
-                elif pick=="9":
-                    action=self.ask("1 Check installation   2 Setup models   0 Back: ")
-                    if action in ("1","2"):self.execute(["check" if action=="1" else "setup"])
+                elif pick=="4":self.choose_folders()
+                elif pick=="5":self.advanced()
+                elif pick=="6":self.execute(["diagnose"])
+                elif pick=="7":self.unfinished()
             except (OSError,ValueError) as e:
                 self.say("Nothing unsafe was forced: "+str(e))
 

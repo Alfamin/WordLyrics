@@ -80,6 +80,7 @@ def parser():
     ap.add_argument("--songs-from", metavar="FILE", help="handle only the songs listed in this text file (one path per line, inside "
                                                            "the music folder); only they and their lyric files go into the backup copy")
     ap.add_argument("--result", metavar="FILE", help="also write what happened to each song into this file (JSON), for other programs")
+    ap.add_argument("--progress", metavar="FILE", help="write live progress for the Noctis plugin")
     ap.add_argument("--backup-to", metavar="FOLDER", help="where the backup copy goes (default: the drive with the most free space)")
     ap.add_argument("--yes", action="store_true", help="do not ask anything, use the defaults")
     ap.add_argument("--dry-run", action="store_true", help="only look at the folder and say what would be done; nothing is copied or written")
@@ -260,9 +261,12 @@ def write_result(path, run, code, error=""):
     import json
     songs = [{"path": s.path, "song": s.rel, "artist": s.artist, "title": s.title, "status": s.result.get("status", "not_reached"),
               "reason": s.result.get("reason", ""), "files": s.result.get("files", [])} for s in (run.songs if run else [])]
-    out = {"wordlyrics": __version__, "exit_code": code, "error": error, "music_folder": run.source if run else "",
+    from .outcome import summarize
+    summary = summarize(run)
+    out = {"wordlyrics": __version__, "exit_code": code, "error": error, "summary": summary, "music_folder": run.source if run else "",
            "run_folder": run.run_dir if run else "", "left_out": [{"path": p, "reason": w} for p, w in (run.not_usable if run else [])],
            "notes": list(run.problems) if run else [], "songs": songs}
+    out["permission_targets"]=list(dict.fromkeys(getattr(run,"permission_targets",[]))) if run else []
     try:
         with open(path + ".tmp", "w", encoding="utf-8") as fh:
             json.dump(out, fh, ensure_ascii=False, indent=1)
@@ -280,6 +284,17 @@ def _main(argv=None):
             pass
     if argv[:1] == ["undo"]:
         return do_undo(argv[1:])
+    if argv[:1]==["launch"]:
+        import json
+        requested=json.loads(os.environ.get("WORDLYRICS_LAUNCH_REQUEST","[]"))
+        if not isinstance(requested,list) or not requested or requested[0] not in ("menu","resume","diagnose") or not all(isinstance(arg,str) for arg in requested):
+            print("INVALID_LAUNCH_REQUEST: open WordLyrics from its shortcut.");return 2
+        return _main(requested)
+    if argv[:1]==["resume"]:
+        if len(argv)!=2:
+            print("Choose a saved job in WordLyrics > Resume / fix unfinished jobs.");return 2
+        from .menu import Menu
+        return Menu(HOME,[],main).resume_job(argv[1])
     if argv[:1] == ["check"]:
         if already_running():
             print("WordLyrics is busy. Check the installation after the current run.")
@@ -327,6 +342,9 @@ def _main(argv=None):
             print("The local configuration could not be read; check its JSON syntax and value types.")
             return 2
         return 0
+    if argv[:1] == ["diagnose"]:
+        from .diagnostics import check
+        return check(HOME)
     if argv[:1] == ["run"]:
         argv = argv[1:]
     opts = parser().parse_args(argv)
@@ -404,6 +422,9 @@ def _main(argv=None):
     from . import report
     from .pipeline import Run, Stop
     run = Run(source, opts, HOME)
+    from .progress import Writer
+    progress = Writer(opts.progress, run)
+    run.screen.on_update = progress.write
     keep_awake(True)
     code, error = 0, ""
     try:
@@ -420,10 +441,16 @@ def _main(argv=None):
         code, error = 1, "the backup could not be completed: %s" % e
         print("\nThe backup could not be completed, so nothing else was done: %s" % e)
         print("Nothing was written to your music folder.")
+        from .recovery import permission_error
+        if permission_error(e):error="PERMISSION_DENIED: "+error
     except Exception as e:
         code, error = 1, "%s: %s" % (type(e).__name__, e)
         run.problems.append("the run ended with an error: %s: %s" % (type(e).__name__, e))
         print("\nThe run ended with an error: %s: %s" % (type(e).__name__, e))
+        from .recovery import permission_error
+        if permission_error(e):
+            error="PERMISSION_DENIED: "+error
+            run.permission_targets.append(getattr(e,"filename",None) or source)
     finally:
         keep_awake(False)
     if run.songs:
@@ -442,8 +469,17 @@ def _main(argv=None):
             print("The report could not be written: %s" % e)
     if run.interrupted and code == 0:
         code = 130
+    from .outcome import summarize
+    summary = summarize(run)
+    if code == 0 and summary["incomplete"]:
+        code, error = 4, summary["message"]
+    print("\n" + summary["message"])
+    progress.write(final=True, error=error or (summary["message"] if code else ""))
     if opts.result:
         write_result(opts.result, run, code, error)
+    write_result(os.path.join(run.run_dir,"outcome.json"),run,code,error)
+    if code:
+        print("Resume only affected songs: WordLyrics > 7 Resume / fix unfinished jobs")
     return code
 
 

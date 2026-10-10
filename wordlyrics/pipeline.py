@@ -77,6 +77,8 @@ class Run:
         self.write_errors = 0              # lyric files in a row that could not be created
         self.only_songs = getattr(opts, "songs", None)    # paths: handle only these songs, not the whole folder
         self.not_usable = []               # [(path as given, why)] of those
+        self.unreadable = []
+        self.permission_targets = []
 
     def look(self, unreadable=None):
         """The files this run is about: the whole folder, or only the named songs and what sits next to them."""
@@ -249,8 +251,17 @@ class Run:
             stage.count = "%s of %s" % (size(done), size(total))
             rate.add(done)
             stage.left = rate.left(total - done)
-        rec = backup.make(self.source, place, files, links, progress, verify=not self.opts.quick_backup, stop=self.stop,
-                          part=self.only_songs is not None)
+        try:
+            rec = backup.make(self.source, place, files, links, progress, verify=not self.opts.quick_backup, stop=self.stop,
+                              part=self.only_songs is not None)
+        except backup.BackupError as error:
+            from .recovery import permission_error
+            if self.opts.backup_to or not permission_error(error):raise
+            fallback=os.path.join(self.home,"backups")
+            if backup.inside(fallback,self.source):raise
+            self.screen.say("BACKUP_FALLBACK: the automatic backup location is not writable; using the app's backup folder.")
+            rec=backup.make(self.source,fallback,files,links,progress,verify=not self.opts.quick_backup,stop=self.stop,
+                            part=self.only_songs is not None)
         self.backup_rec = rec
         how = "checked byte for byte" if rec["verified_byte_for_byte"] else "sizes checked"
         if rec["linked_to_previous_backup"]:
@@ -273,7 +284,9 @@ class Run:
                                      lyrics_file=getattr(self.opts,"lyrics_file",None))
             except Exception as e:
                 s = L.Song(path=path, rel=rel, size=sz)
-                s.skip = "could not be read (%s)" % type(e).__name__
+                from .recovery import permission_error
+                s.skip = "PERMISSION_DENIED: cannot read this song" if permission_error(e) else "could not be read (%s)" % type(e).__name__
+                if permission_error(e):self.permission_targets.append(getattr(e,"filename",None) or path)
                 out[i] = s
             return rel
         with ThreadPoolExecutor(4) as ex:
@@ -299,7 +312,18 @@ class Run:
                 self.screen.fact("Runs on", self.engine.describe())
                 self.set_speed()
             except Exception as e:
-                self.engine_error = e
+                try:
+                    from .recovery import repair_models
+                    self.screen.say("MODEL_LOAD_FAILED: checking the app's model files before one repair attempt.")
+                    repaired=repair_models(models_dir,models.MODELS,
+                        lambda model,folder:models.download(model,folder,stop=self.stop,note=self.screen.say),
+                        say=self.screen.say,stop=self.stop)
+                    if not repaired:raise e
+                    self.engine=Engine(models_dir,"cpu",None,self.screen.say)
+                    self.engine.stop=self.stop
+                    self.screen.fact("Runs on",self.engine.describe()+" (repaired model files)")
+                    self.set_speed()
+                except Exception as failure:self.engine_error=failure
         t = threading.Thread(target=load, daemon=True)
         self.engine_loader=t
         t.start()
@@ -328,21 +352,18 @@ class Run:
             if client.provider_config.get("configuration_error"):
                 self.problems.append("Genius was disabled because lyrics-providers.json could not be read. Check its JSON syntax and value types.")
             rate = Rate(120)
-            pauses = 0
             for n, s in enumerate(todo, 1):
                 if self.stop.is_set():
                     return
                 stage.now = s.rel
-                found, note = None, "the lyrics service could not be reached"
-                if pauses < 3:
-                    found, note = fetch.lookup(client, s, self.stop)
-                    if client.errors_in_a_row >= 6:           # the connection is gone: wait a little, then go on
-                        pauses += 1
-                        self.screen.say("The lyrics service does not answer. Waiting a minute (%d of 3) ..." % pauses)
-                        self.stop.wait(60)
-                        client.errors_in_a_row = 0
-                        if pauses >= 3:
-                            self.screen.say("Giving up on looking for lyrics online for the remaining songs. Run again later to retry them.")
+                found, note = fetch.lookup(client, s, self.stop)
+                for provider, issue in client.network_failures.items():
+                    if issue not in self.problems:
+                        self.problems.append(issue)
+                        self.screen.say(issue)
+                for recovery_note in getattr(client,"recovery_notes",[]):
+                    if recovery_note not in self.problems:
+                        self.problems.append(recovery_note);self.screen.say(recovery_note)
                 s.found, s.fetch_note = found, note
                 self.undecided = len(todo) - n
                 if found is not None or (s.tier == L.PLAIN and not s.lyrics_url and not (fetch.wants_uncensored(s) and fetch.censored(s.text))):
@@ -365,8 +386,11 @@ class Run:
             ready.put(None)
 
     def no_lyrics(self, song, note):
-        self.record(song, status="no_lyrics", reason=note)
-        self.count("no_lyrics")
+        unavailable = bool(self.lyrics_client and getattr(self.lyrics_client, "network_failures", {}) and
+                           any(value in note for value in self.lyrics_client.network_failures.values()))
+        status = "network_error" if unavailable else "no_lyrics"
+        self.record(song, status=status, reason=note)
+        self.count(status)
 
     # ------------------------------------------------------------------ listening
     def producer(self, ready, work):
@@ -552,6 +576,11 @@ class Run:
             if self.stop.is_set():
                 return
             why = e.strerror or type(e).__name__
+            from .recovery import permission_error
+            if permission_error(e):
+                why="PERMISSION_DENIED: "+why
+                target=getattr(e,"filename",None)
+                self.permission_targets.append(target if target and target.lower().endswith(".elrc") else os.path.dirname(song.path))
             # "remembered" keeps this out of the list of songs not to try again: the song itself is fine
             self.record(song, status="failed", remembered=True,
                         reason="the lyrics file could not be created next to the song (%s)" % why)
@@ -650,6 +679,8 @@ class Run:
     def run(self):
         o, sc = self.opts, self.screen
         os.makedirs(self.run_dir, exist_ok=True)
+        from . import resume
+        resume.save(self)
         memo = os.path.join(self.lib_home, "could not be timed.json")
         try:
             self.remembered = json.load(open(memo, encoding="utf-8"))
@@ -666,9 +697,12 @@ class Run:
         sc.on_key = self.key
         self.set_speed()
         sc.start()
+        ft = None
         try:
             unreadable = []
             files, links = self.look(unreadable)
+            self.unreadable = unreadable
+            for path in unreadable:self.permission_targets.append(os.path.abspath(os.path.join(self.source,path)))
             few = self.only_songs is not None
             for given, why in self.not_usable:
                 self.problems.append("Left out: %s (%s)" % (given, why))
@@ -681,6 +715,7 @@ class Run:
                 audio_files = [f for f in audio_files if any(x.lower() in f[1].lower() for x in o.only)]
             if o.limit:
                 audio_files = audio_files[: o.limit]
+            resume.save(self,paths=[row[0] for row in audio_files] if audio_files else self.only_songs)
             sc.fact("Music", "%s  (%d songs, %s in %d files)" % (self.source, len(audio_files), size(sum(f[2] for f in files)), len(files)))
             if not audio_files and few:
                 raise Stop("None of the songs given is a song file inside %s. Nothing was done." % self.source)
@@ -689,13 +724,15 @@ class Run:
                            "Looked for: %s" % " ".join(sorted(x[1:] for x in L.AUDIO_EXT)))
             # a whole folder: the models load while the backup runs. A few songs: the models are only
             # fetched and loaded once it is clear that there is something to listen to
-            engine_thread = None if few else self.start_engine(self.get_models(st_models))
+            engine_thread = None
             rec = self.do_backup(st_backup, files, links)
             before = rec["files"]
             self.read_songs(st_read, audio_files)
+            resume.save(self)
             for s in self.songs:
                 if s.skip:
-                    self.record(s, status="skipped", reason=s.skip)
+                    status = "failed" if s.skip.startswith(("could not be read","PERMISSION_DENIED")) else "not_timed" if s.skip.startswith("invalid ") else "skipped"
+                    self.record(s, status=status, reason=s.skip)
             chosen_words=[s for s in self.songs if not s.skip and not s.lyrics_url and s.tier in (L.PLAIN,L.LINE) and
                           (getattr(o,"lyrics_file",None) or (getattr(o,"redo",False) and getattr(o,"retime_mode","current")!="fresh"))]
             for s in chosen_words:
@@ -710,9 +747,9 @@ class Run:
                 self.enqueue(ready, s)
             ft = threading.Thread(target=self.fetcher, args=(st_fetch, todo_fetch, ready), daemon=True)
             ft.start()
-            if few:
-                while ft.is_alive():
-                    ft.join(0.5)
+            if engine_thread is None:
+                while ft.is_alive() and not self.queued_n:
+                    ft.join(0.2)
                     if self.stop.is_set():
                         raise Stop()
                 if self.queued_n:
@@ -743,6 +780,9 @@ class Run:
                     self.record(s, status="not_reached", reason="the run was stopped before this song")
             self.final_check(st_check, before)
         finally:
+            self.stop.set()
+            if ft is not None and ft.is_alive():
+                ft.join(timeout=15)  # bounded provider requests; finish logging before closing its file
             if self.engine_loader is not None and self.engine_loader.is_alive():
                 self.stop.set()
                 self.engine_loader.join()

@@ -17,6 +17,7 @@ GROUPS = [
     ("skipped", "Left alone", "Nothing to do for these songs."),
     ("not_timed", "Lyrics present, but could not be timed well enough", "Nothing was written for these. Their existing lyrics are untouched."),
     ("no_lyrics", "No usable lyrics found", "No usable lyric source was found for this run. Existing lyric files, if any, were preserved."),
+    ("network_error", "Lyric provider unavailable", "The search could not be completed because a provider could not be reached. Check the connection diagnostics and retry these songs."),
     ("rejected", "Lyrics found online, but rejected", "The lyrics found did not match what is sung in the file, so nothing was written."),
     ("failed", "Could not be read", "The audio of these files could not be used."),
     ("not_reached", "Not reached", "The run was stopped before these songs. Run again to continue; finished songs are skipped."),
@@ -47,13 +48,16 @@ def summary_lines(run):
     c = {}
     for s in run.songs:
         c[s.result.get("status", "not_reached")] = c.get(s.result.get("status", "not_reached"), 0) + 1
-    already = sum(1 for s in run.songs if s.result.get("status") == "skipped" and "already" in s.result.get("reason", ""))
+    already = sum(1 for s in run.songs if s.result.get("status") == "skipped" and "already has word-by-word lyrics" in s.result.get("reason", ""))
     took = (datetime.now() - run.started).total_seconds()
     out = ["%d songs in %s" % (len(run.songs), run.source), ""]
+    from .outcome import summarize
+    out.insert(0, summarize(run)["message"])
     out.append("  %5d  now have word-by-word lyrics from this run" % c.get("timed", 0))
     out.append("  %5d  already had word-by-word lyrics (left alone)" % already)
     for key, label in (("lines_only", "got line-timed lyrics only"), ("not_timed", "have lyrics that could not be timed well enough (nothing written)"),
                        ("no_lyrics", "had no usable lyric source found (existing files preserved)"), ("rejected", "had online lyrics rejected (did not match the recording)"),
+                       ("network_error", "could not finish lyric search (connection/provider error)"),
                        ("failed", "could not be read"), ("not_reached", "were not reached (run stopped early)")):
         if c.get(key):
             out.append("  %5d  %s" % (c[key], label))
@@ -163,7 +167,7 @@ def write(run):
         if not songs:
             continue
         h.append("<details%s><summary>%s <span>(%d)</span></summary><p class='dim'>%s</p><table>" % (
-            " open" if key in ("not_timed", "rejected", "failed") and len(songs) <= 40 else "", e(title), len(songs), e(blurb)))
+            " open" if key in ("network_error", "no_lyrics", "not_timed", "rejected", "failed") and len(songs) <= 40 else "", e(title), len(songs), e(blurb)))
         for s in sorted(songs,key=lambda s:s.rel.lower()):
             link=""
             if key in ("no_lyrics","not_timed","rejected","failed"):

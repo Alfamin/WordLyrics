@@ -26,7 +26,7 @@ internal sealed class Tool
     public bool Installed => File.Exists(Bat);
 
     /// <summary>The first WordLyrics that can be given single songs and reports what it did with them.</summary>
-    private static readonly Version Needed = new(1, 1, 0);
+    private static readonly Version Needed = new(1, 5, 0);
 
     /// <summary>Installed, but from before it could be handed single songs.</summary>
     public bool TooOld
@@ -56,8 +56,9 @@ internal sealed class Tool
                 if (!Installed || TooOld) return false;
                 var python = Path.Combine(Folder, ".python");
                 var models = Path.Combine(Folder, "models");
-                return Directory.Exists(python) && Directory.EnumerateFiles(python, "ready-*.txt").Any()
-                    && Directory.Exists(models) && Directory.EnumerateFiles(models, "*.onnx").Take(2).Count() == 2;
+                return File.Exists(Path.Combine(python, "python.exe")) && Directory.EnumerateFiles(python, "ready-*.txt").Any()
+                    && new FileInfo(Path.Combine(models, "mms_fa_300m.onnx")).Length == 1262421764
+                    && new FileInfo(Path.Combine(models, "Kim_Vocal_2.onnx")).Length == 66759214;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -70,22 +71,61 @@ internal sealed class Tool
     /// Times the songs listed in <paramref name="listFile"/>, without a window. What happened to
     /// each song is written to <paramref name="resultFile"/>, the program's own output to <paramref name="logFile"/>.
     /// </summary>
-    public Process StartQuietRun(string root, string listFile, string resultFile, string logFile, string speed, string backup, bool retry)
+    public Process StartQuietRun(string root, string listFile, string resultFile, string logFile, string speed, string backup, bool retry, string? progressFile = null)
     {
-        var run = $"\"{Bat}\" \"{FolderArgument(root)}\" --songs-from \"{listFile}\" --result \"{resultFile}\""
-                  + $" --yes --no-open --plain-output --speed {speed}" + (retry ? " --retry" : "");
-        backup = backup.Trim().Trim('"');
-        if (backup.Length > 0) run += $" --backup-to \"{FolderArgument(Environment.ExpandEnvironmentVariables(backup))}\"";
-        var info = new ProcessStartInfo(Cmd)
+        // Pass paths as real arguments. cmd.exe expands %variables% even inside quotes.
+        var python = Environment.GetEnvironmentVariable("WORDLYRICS_PYTHON");
+        var info = new ProcessStartInfo(string.IsNullOrWhiteSpace(python) ? Path.Combine(Folder, ".python", "python.exe") : python)
         {
-            // /s: everything between the outer quotes is the command, with its own quotes left alone
-            Arguments = $"/d /s /c \"{run} > \"{logFile}\" 2>&1\"",
             UseShellExecute = false,
             CreateNoWindow = true,
             WorkingDirectory = Folder,
+            RedirectStandardOutput = true, RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8,
         };
+        foreach (var arg in new[] { "-X", "utf8", "-m", "wordlyrics.runner", root, "--songs-from", listFile, "--result", resultFile,
+            "--yes", "--no-open", "--plain-output", "--speed", speed }) info.ArgumentList.Add(arg);
+        if (retry) info.ArgumentList.Add("--retry");
+        if (progressFile is not null) { info.ArgumentList.Add("--progress"); info.ArgumentList.Add(progressFile); }
+        backup = backup.Trim().Trim('"');
+        if (backup.Length > 0) { info.ArgumentList.Add("--backup-to"); info.ArgumentList.Add(Environment.ExpandEnvironmentVariables(backup)); }
+        info.Environment["WORDLYRICS_HOME"] = Folder;
+        info.Environment["PYTHONPATH"] = Folder;
         info.Environment["WORDLYRICS_NO_PAUSE"] = "1"; // the launcher waits for a key press otherwise
-        return Process.Start(info) ?? throw new InvalidOperationException("WordLyrics could not be started.");
+        File.WriteAllText(logFile, "WordLyrics background run\n", new UTF8Encoding(false));
+        var gate = new object();
+        void Log(object sender, DataReceivedEventArgs e)
+        {
+            if (e.Data is null) return;
+            try { lock (gate) { if (new FileInfo(logFile).Length < 5_000_000) File.AppendAllText(logFile, e.Data + "\n", new UTF8Encoding(false)); } }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        var process = new Process { StartInfo = info };
+        process.OutputDataReceived += Log; process.ErrorDataReceived += Log;
+        if (!process.Start()) { process.Dispose(); throw new InvalidOperationException("WordLyrics could not be started."); }
+        process.BeginOutputReadLine(); process.BeginErrorReadLine();
+        return process;
+    }
+
+    public void OpenLibraryMenu(string settingsFile)
+    {
+        var info = new ProcessStartInfo(Cmd)
+        {
+            Arguments = $"/d /s /c \"\"{Bat}\" menu\"", UseShellExecute = false, CreateNoWindow = false, WorkingDirectory = Folder,
+        };
+        info.Environment["WORDLYRICS_NOCTIS_SETTINGS"] = settingsFile;
+        Process.Start(info)?.Dispose();
+    }
+
+    public void OpenResume(string runFolder)
+    {
+        var info = new ProcessStartInfo(Cmd)
+        {
+            Arguments = $"/d /s /c \"\"{Bat}\" launch\"", UseShellExecute = false, CreateNoWindow = false, WorkingDirectory = Folder,
+        };
+        info.Environment["WORDLYRICS_LAUNCH_REQUEST"] = System.Text.Json.JsonSerializer.Serialize(new[] { "resume", runFolder });
+        Process.Start(info)?.Dispose();
     }
 
     /// <summary>Opens WordLyrics in its own window on a whole folder; it asks its questions there.</summary>

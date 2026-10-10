@@ -70,7 +70,15 @@ def default_place(source):
 
 
 def inside(child, parent):
-    c, p = os.path.normcase(os.path.realpath(child)), os.path.normcase(os.path.realpath(parent))
+    def canonical(value):
+        value=os.fspath(value)
+        if os.name=="nt" and value.startswith("\\\\?\\UNC\\"):value="\\\\"+value[8:]
+        elif os.name=="nt" and value.startswith("\\\\?\\"):value=value[4:]
+        result=os.path.normcase(os.path.realpath(value))
+        if os.name=="nt" and result.startswith("\\\\?\\UNC\\"):result="\\\\"+result[8:]
+        elif os.name=="nt" and result.startswith("\\\\?\\"):result=result[4:]
+        return result
+    c, p = canonical(child),canonical(parent)
     return c == p or c.startswith(p.rstrip("\\/") + os.sep)
 
 

@@ -20,7 +20,7 @@ internal sealed class Worker : IDisposable
 {
     private static readonly HashSet<string> Audio = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".mp3", ".flac", ".m4a", ".mp4", ".ogg", ".oga", ".opus", ".wav", ".aiff", ".aif", ".wma", ".aac", ".ape", ".wv",
+        ".mp3", ".flac", ".m4a", ".mp4", ".ogg", ".oga", ".opus", ".wav", ".aiff", ".aif", ".aifc", ".wma", ".aac", ".ape", ".wv", ".alac", ".asf", ".dsf", ".dff",
     };
     // A song with one of these next to it already has word-by-word lyrics.
     private static readonly string[] WordLyrics = { ".elrc", ".ttml", ".lyricsfile" };
@@ -32,7 +32,6 @@ internal sealed class Worker : IDisposable
     // open for writing holds it back anyway (see Ripe).
     private static readonly TimeSpan QuietAfterRename = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan QuietAfterCreate = TimeSpan.FromSeconds(10);
-    private static readonly TimeSpan GiveUpWaiting = TimeSpan.FromHours(6);
     private static readonly TimeSpan FolderCheck = TimeSpan.FromSeconds(60);
     private const int MaxSongsPerRun = 200;
     private const int MaxTries = 2;
@@ -42,6 +41,7 @@ internal sealed class Worker : IDisposable
     private readonly string _settingsFile;
     private readonly Action<string> _log;
     private readonly Action<string> _notify;
+    private readonly Action<ProgressState> _progress;
     private readonly object _gate = new();
     private readonly Dictionary<string, Item> _items = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, FileSystemWatcher> _watchers = new(StringComparer.OrdinalIgnoreCase);
@@ -74,13 +74,14 @@ internal sealed class Worker : IDisposable
     /// <param name="settingsFile">Noctis's settings file, which names the library folders.</param>
     /// <param name="log">Called from any thread.</param>
     /// <param name="notify">Called from any thread.</param>
-    public Worker(string dataDirectory, string settingsFile, Options options, Action<string> log, Action<string> notify)
+    public Worker(string dataDirectory, string settingsFile, Options options, Action<string> log, Action<string> notify, Action<ProgressState>? progress = null)
     {
         _data = dataDirectory;
         _settingsFile = settingsFile;
         _options = options;
         _log = log;
         _notify = notify;
+        _progress = progress ?? (_ => { });
         Directory.CreateDirectory(_data);
 
         var first = !File.Exists(StateFile);
@@ -98,6 +99,8 @@ internal sealed class Worker : IDisposable
         get { lock (_gate) return _options; }
         set { lock (_gate) _options = value; }
     }
+
+    public string SettingsFile => _settingsFile;
 
     /// <summary>The Noctis library folders that exist right now.</summary>
     public IReadOnlyList<string> LibraryFolders()
@@ -126,7 +129,7 @@ internal sealed class Worker : IDisposable
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return "The song's file is not there.";
         if (!Audio.Contains(Path.GetExtension(path))) return "WordLyrics cannot read this kind of file.";
-        if (HasWordLyrics(path)) return "This song already has word-by-word lyrics.";
+        if (HasWordLyrics(path)) return "An existing .elrc/.ttml/.lyricsfile is protected. Open Generate timestamps > Songs to check its timing or safely repair an .elrc file.";
         var tool = new Tool(Options.Folder);
         if (!tool.Ready) return NotReady(tool);
 
@@ -190,6 +193,7 @@ internal sealed class Worker : IDisposable
     private void Work()
     {
         var now = DateTime.UtcNow;
+        if (_run is not null) ReadProgress();
         if (now - _foldersChecked >= FolderCheck)
         {
             _foldersChecked = now;
@@ -234,11 +238,19 @@ internal sealed class Worker : IDisposable
                 _saidNotReady = true;
                 _log("songs are waiting, but WordLyrics is not set up in " + tool.Folder);
                 _notify(NotReady(tool));
+                _progress(new ProgressState("Setup is needed", NotReady(tool), Error: true, Finished: true));
             }
             return;
         }
         _saidNotReady = false;
-        Start(tool, batch, options);
+        try { Start(tool, batch, options); }
+        catch (Exception ex)
+        {
+            foreach (var item in batch) item.NotBefore = now + TimeSpan.FromMinutes(2);
+            var message = $"WORDLYRICS_START_FAILED ({ex.GetType().Name}): the background program could not start. Check the WordLyrics folder and installation. Retrying in two minutes.";
+            _log(message); _notify(message);
+            _progress(new ProgressState("WordLyrics could not start", message, Total: batch.Count, Finished: true, Error: true));
+        }
     }
 
     /// <summary>Has the file been left alone long enough, and does it still need lyrics? Called under the lock.</summary>
@@ -248,8 +260,9 @@ internal sealed class Worker : IDisposable
         try
         {
             var file = new FileInfo(item.Path);
-            if (!file.Exists || now - item.Seen > GiveUpWaiting)
+            if (!file.Exists)
             {
+                if (!Directory.Exists(item.Root)) { item.NotBefore=now+TimeSpan.FromMinutes(1);return false; }
                 if (!file.Exists && now - item.Seen < TimeSpan.FromMinutes(1)) return false; // may be on its way
                 item.Length = -2; // taken off the list
                 return false;
@@ -377,27 +390,62 @@ internal sealed class Worker : IDisposable
     private string ListFile => Path.Combine(_data, "songs.txt");
     private string ResultFile => Path.Combine(_data, "result.json");
     private string OutputFile => Path.Combine(_data, "last run.log");
+    private string ProgressFile => Path.Combine(_data, "progress.json");
     private string StateFile => Path.Combine(_data, "state.json");
 
     private void Start(Tool tool, List<Item> batch, Options options)
     {
         File.WriteAllLines(ListFile, batch.Select(i => i.Path), new UTF8Encoding(false));
         File.Delete(ResultFile);
+        File.Delete(ProgressFile);
         var speed = options.Speed.ToLowerInvariant() is "full" or "half" or "light" ? options.Speed.ToLowerInvariant() : "half";
         Process run;
         lock (_gate)
         {
             if (_disposed || _run is not null) return;
-            run = _run = tool.StartQuietRun(batch[0].Root, ListFile, ResultFile, OutputFile, speed, options.Backup, retry: batch[0].Asked);
+            run = _run = tool.StartQuietRun(batch[0].Root, ListFile, ResultFile, OutputFile, speed, options.Backup, retry: batch[0].Asked, ProgressFile);
             _job = Job.Around(run);
         }
         _log($"started WordLyrics on {batch.Count} song{(batch.Count == 1 ? "" : "s")} ({speed} speed)");
+        _progress(new ProgressState("Starting WordLyrics", $"{batch.Count} songs queued. Preparing backup and lyric search...", Total: batch.Count));
         Task.Run(async () =>
         {
             try { await run.WaitForExitAsync().ConfigureAwait(false); }
             catch (Exception) { /* killed while we waited */ }
             Safe(() => Finished(run, batch));
         });
+    }
+
+    private void ReadProgress()
+    {
+        Process? active;
+        lock (_gate) active = _run;
+        if (active is null) return;
+        try
+        {
+            var file = new FileInfo(ProgressFile);
+            if (!file.Exists || file.Length > 64 * 1024) return;
+            using var doc = JsonDocument.Parse(File.ReadAllText(ProgressFile));
+            var root = doc.RootElement;
+            var completed = root.GetProperty("completed").GetInt32();
+            var total = root.GetProperty("total").GetInt32();
+            var detail = Text(root, "notice");
+            string message = "Preparing WordLyrics";
+            double? fraction = null;
+            if (root.TryGetProperty("stages", out var stages))
+                foreach (var stage in stages.EnumerateArray())
+                    if (Text(stage, "state") == "running")
+                    {
+                        message = Text(stage, "name");
+                        detail = string.Join("\n", new[] { Text(stage, "count"), Text(stage, "current"), Text(stage, "note"), Text(root, "notice") }.Where(s => s.Length > 0));
+                        detail += "\nWorking - last update " + file.LastWriteTime.ToString("HH:mm:ss");
+                        var count = stage.GetProperty("total").GetDouble();
+                        fraction = count > 0 ? Math.Clamp(stage.GetProperty("done").GetDouble() / count, 0, 1) : null;
+                    }
+            lock (_gate)
+                if (ReferenceEquals(_run, active)) _progress(new ProgressState(message, detail, completed, total, fraction));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or KeyNotFoundException or FormatException) { }
     }
 
     private void Finished(Process run, List<Item> batch)
@@ -410,6 +458,8 @@ internal sealed class Worker : IDisposable
         var now = DateTime.UtcNow;
         var outcome = new Dictionary<string, (string Status, string Title)>(StringComparer.OrdinalIgnoreCase);
         var error = "";
+        var reason = "";
+        var report = "";
         if (code != ExitAlreadyRunning && File.Exists(ResultFile))
         {
             try
@@ -417,9 +467,13 @@ internal sealed class Worker : IDisposable
                 using var document = JsonDocument.Parse(File.ReadAllText(ResultFile));
                 var root = document.RootElement;
                 error = Text(root, "error");
+                report = Path.Combine(Text(root, "run_folder"), "report.html");
                 if (root.TryGetProperty("songs", out var songs) && songs.ValueKind == JsonValueKind.Array)
                     foreach (var song in songs.EnumerateArray())
+                    {
                         outcome[Usual(Text(song, "path"))] = (Text(song, "status"), Text(song, "title"));
+                        if (reason.Length == 0 && Text(song, "status") is not "timed" and not "skipped") reason = Text(song, "reason");
+                    }
                 if (root.TryGetProperty("left_out", out var left) && left.ValueKind == JsonValueKind.Array)
                     foreach (var song in left.EnumerateArray())
                         outcome[Usual(Text(song, "path"))] = ("left_out", "");
@@ -452,7 +506,7 @@ internal sealed class Worker : IDisposable
                     continue;
                 }
                 if (stopped) continue; // Noctis is closing: the song stays on the list
-                if (status is "" or "failed" or "not_reached")
+                if (status is "" or "failed" or "not_reached" or "network_error")
                 {
                     // Noctis may have been writing to the file, or the run broke off: once more, later
                     if (++item.Tries < MaxTries)
@@ -473,12 +527,25 @@ internal sealed class Worker : IDisposable
         if (code == ExitAlreadyRunning)
         {
             _log("WordLyrics is running in another window; trying again in a minute");
+            _progress(new ProgressState("Waiting for another WordLyrics run", "Another window is using the model. This batch will retry in a minute.", Total: batch.Count));
+            return;
+        }
+        if (code == 70)
+        {
+            _progress(new ProgressState("Setup is needed", "ENVIRONMENT_REPAIR_FAILED: private packages could not be repaired. Open Set up WordLyrics; the queued songs are saved. Startup log: " + OutputFile, Finished: true, Error: true, Report: report));
             return;
         }
         _log($"WordLyrics finished (exit code {code}): " +
              (counts.Count == 0 ? "to be tried again" : string.Join(", ", counts.Select(c => $"{c.Value} {c.Key}"))) +
              (error.Length > 0 ? " - " + error : ""));
         var message = Summary(counts, titles, asked);
+        var timed = counts.GetValueOrDefault("timed");
+        var failed = counts.Where(c => c.Key is not "timed" and not "skipped").Sum(c => c.Value);
+        var detail = string.Join("\n", new[] { error, reason, $"Details: {ResultFile}", $"Startup log: {OutputFile}" }.Where(s => s.Length > 0));
+        var retrying = counts.Count == 0 && outcome.Count != 0 || (counts.Count == 0 && code != 0);
+        _progress(new ProgressState(retrying ? "Retry scheduled" : timed > 0 ? $"{timed} songs received word timestamps" : "No new word timestamps were written",
+            detail + (failed > 0 ? $"\n{failed} songs need attention." : ""), counts.Values.Sum(), batch.Count,
+            Finished: true, Error: failed > 0 || code != 0, Report: report));
         if (message is not null && (asked || Options.Notify)) _notify(message);
         _timer.Change(TimeSpan.FromSeconds(1), Tick); // anything else waiting?
     }
@@ -497,6 +564,7 @@ internal sealed class Worker : IDisposable
                 "timed" => $"Word-by-word lyrics are ready: {title}",
                 "lines_only" => $"Line-by-line lyrics written (words could not be timed): {title}",
                 "no_lyrics" => $"No lyrics were found for: {title}",
+                "network_error" => $"Lyric provider unavailable. Open WordLyrics progress for the connection error: {title}",
                 "rejected" => $"The lyrics found online do not match the recording: {title}",
                 "not_timed" => $"The lyrics could not be timed well enough: {title}",
                 "skipped" => asked ? $"Nothing to do (it already has word-by-word lyrics, or a twin file gets them): {title}" : null,
@@ -536,7 +604,7 @@ internal sealed class Worker : IDisposable
             foreach (var entry in waiting.EnumerateArray())
             {
                 string path = Text(entry, "path"), folder = Text(entry, "root");
-                if (path.Length == 0 || folder.Length == 0 || !File.Exists(path)) continue;
+                if (path.Length == 0 || folder.Length == 0 || (!File.Exists(path) && Directory.Exists(folder))) continue;
                 _items[path] = new Item
                 {
                     Path = path, Root = folder, Seen = now, QuietSince = now, NotBefore = now,
@@ -614,6 +682,7 @@ internal sealed class Worker : IDisposable
         catch (Exception ex)
         {
             try { _log($"error: {ex.GetType().Name}: {ex.Message}"); } catch { /* nothing more to do */ }
+            try { _progress(new ProgressState("WordLyrics encountered an error", $"WORKER_ERROR ({ex.GetType().Name}): {ex.Message}", Finished: true, Error: true)); } catch { }
         }
     }
 

@@ -136,6 +136,8 @@ class Engine:
                 saved = json.load(open(settings_path, encoding="utf-8"))
             except Exception:
                 saved = {}
+        locations=saved.get("where") if isinstance(saved,dict) else None
+        if not isinstance(locations,dict) or any(value not in ("cpu","gpu") for value in locations.values()):saved={}
         if saved.get("signature") == sig and set(saved.get("where", {})) == {ALIGNER, SEPARATOR}:
             self.where = dict(saved["where"])
             self.speed = saved.get("seconds", {})
@@ -155,9 +157,14 @@ class Engine:
                 t_gpu = min(self._bench(m, "gpu"), self._bench(m, "gpu"))
             except Exception:
                 self._drop(m, "gpu")
-            t_cpu = self._bench(m, "cpu")
+            try:t_cpu = self._bench(m, "cpu")
+            except Exception:
+                if t_gpu is None:raise
+                t_cpu=None
+                self.note="CPU_UNAVAILABLE: the graphics card passed its test; using it for this model."
+                self.say(self.note)
             self.speed[m] = {"gpu": t_gpu, "cpu": t_cpu}
-            self.where[m] = "gpu" if t_gpu is not None and t_gpu < t_cpu else "cpu"
+            self.where[m] = "gpu" if t_gpu is not None and (t_cpu is None or t_gpu < t_cpu) else "cpu"
             self._drop(m, "cpu" if self.where[m] == "gpu" else "gpu")
         if settings_path:
             try:
@@ -189,7 +196,7 @@ class Engine:
             self.gpu_failures += 1
             self.where[model] = "cpu"
             self._drop(model, "gpu")
-            self.note = "the graphics card ran out of memory, switched to the processor"
+            self.note = "GPU_FALLBACK: the graphics card failed; continuing on the processor"
             self.say(self.note)
             return self._session(model, "cpu").run(outs, feed)
 

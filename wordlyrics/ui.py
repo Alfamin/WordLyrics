@@ -147,6 +147,7 @@ class Screen:
         self._restored = False
         self.keys = ""              # one line saying which keys do something (only when keys can be read)
         self.on_key = None          # called with the key that was pressed
+        self.on_update = None       # optional atomic status writer for Noctis
         self.can_read_keys = self.live and os.name == "nt" and sys.stdin.isatty()
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -220,9 +221,11 @@ class Screen:
         return out
 
     def draw(self):
+        if self.on_update:
+            self.on_update(self)
         if not self.live:
             now = time.time()
-            if now - self._last_plain >= 60:
+            if now - self._last_plain >= 10:
                 self._last_plain = now
                 for i, s in enumerate(self.stages, 1):
                     if s.state == RUN:

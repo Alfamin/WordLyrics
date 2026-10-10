@@ -63,7 +63,9 @@ def fetch(urls, dest):
             os.replace(dest + ".part", dest)
             return True
         except Exception as e:
-            last = "%s: %s" % (type(e).__name__, e)
+            from wordlyrics.network import explain
+            code,message=explain(e)
+            last = "[%s] %s" % (code,message)
             say("   did not work (%s)" % last)
     return False
 
@@ -90,6 +92,9 @@ def with_each_index(make_cmd, what):
 def main():
     env_version = sys.argv[1] if len(sys.argv) > 1 else "1"
     t0 = time.time()
+    if os.path.realpath(PYDIR)!=os.path.realpath(os.path.join(APP,".python")):
+        say("ENVIRONMENT_REPAIR_REFUSED: setup changes only WordLyrics' private Python.")
+        return 1
     write_pth()
 
     say("Step 2 of 3: the package installer (pip, about 2 MB)")
@@ -105,7 +110,9 @@ def main():
     say()
 
     say("Step 3 of 3: the packages that read audio and run the models (about 80 MB to download)")
-    if not with_each_index(lambda u: [PY, "-m", "pip", "install", "--require-hashes", "--only-binary", ":all:", "-r", REQ],
+    damaged=works("import "+", ".join(NEEDS)).returncode!=0
+    force=["--force-reinstall"] if os.environ.get("WORDLYRICS_REPAIR_PACKAGES")=="1" or damaged else []
+    if not with_each_index(lambda u: [PY, "-m", "pip", "install", *force, "--require-hashes", "--only-binary", ":all:", "-r", REQ],
                            "The packages"):
         return 1
     r = works("import %s; import onnxruntime as o; print(o.__version__, 'DmlExecutionProvider' in o.get_available_providers())"
@@ -113,6 +120,7 @@ def main():
     if r.returncode != 0:
         say()
         say("The packages were installed but do not start on this computer:")
+        say("SETUP_IMPORT_FAILED: Python exit code %s. Check supported Windows/architecture, security-software quarantine, and available memory." % r.returncode)
         for ln in (r.stderr or r.stdout).strip().splitlines()[-3:]:
             say("   " + ln)
         say("WordLyrics needs 64-bit Windows 10 (version 1903 or newer) or Windows 11.")

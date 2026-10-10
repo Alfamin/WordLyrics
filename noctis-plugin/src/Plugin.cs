@@ -1,4 +1,6 @@
 using Avalonia.Threading;
+using Avalonia;
+using Avalonia.Controls.ApplicationLifetimes;
 using Noctis.Plugins;
 
 namespace WordLyricsForNoctis;
@@ -17,11 +19,14 @@ public sealed class WordLyricsPlugin : INoctisPlugin
     private readonly List<IDisposable> _registrations = new();
     private IPluginHost? _host;
     private Worker? _worker;
+    private ProgressWindow? _progress;
+    private ProgressState _lastProgress = new("Waiting for new music");
+    private bool _autoShownForJob;
 
     public PluginInfo Info { get; } = new(
         Id: "dev.moshi.wordlyrics",
         Name: "WordLyrics",
-        Version: "1.0.1",
+        Version: "1.1.0",
         Author: "moshi",
         Description: "Word-by-word lyrics for new songs, by themselves: the WordLyrics program finds the lyrics of a song that was added to the library and times every word in the background.");
 
@@ -31,7 +36,7 @@ public sealed class WordLyricsPlugin : INoctisPlugin
         // The plugin API does not say where the library folders are; Noctis's own settings file,
         // two levels above the plugin's data folder, does.
         var settings = Path.GetFullPath(Path.Combine(host.DataDirectory, "..", "..", "settings.json"));
-        _worker = new Worker(host.DataDirectory, settings, ReadOptions(host), Log, Notify);
+        _worker = new Worker(host.DataDirectory, settings, ReadOptions(host), Log, Notify, OnProgress);
 
         _registrations.Add(host.RegisterTrackCommand(
             "Time the words (WordLyrics)",
@@ -49,6 +54,8 @@ public sealed class WordLyricsPlugin : INoctisPlugin
         foreach (var registration in _registrations) registration.Dispose();
         _registrations.Clear();
         _worker?.Dispose();
+        _progress?.Close();
+        _progress = null;
         _worker = null;
         _host = null;
     }
@@ -87,6 +94,7 @@ public sealed class WordLyricsPlugin : INoctisPlugin
     {
         var worker = _worker;
         if (_host is null || worker is null) return;
+        if (key == "progress") { ShowProgress(); return; }
         Options options;
         try { options = ReadOptions(_host); }
         catch (Exception) { return; }
@@ -103,10 +111,8 @@ public sealed class WordLyricsPlugin : INoctisPlugin
                 }
                 else if (key == LibraryKey)
                 {
-                    var folder = worker.LibraryFolders().FirstOrDefault();
                     if (!tool.Installed) Notify("The WordLyrics program is not installed yet. Flip \"Install or update WordLyrics\" first.");
-                    else if (folder is null) Notify("Noctis has no library folder yet.");
-                    else tool.OpenOnFolder(folder);
+                    else tool.OpenLibraryMenu(worker.SettingsFile);
                 }
             }
             catch (Exception ex)
@@ -121,6 +127,48 @@ public sealed class WordLyricsPlugin : INoctisPlugin
     private void Log(string message) => OnUi(() => _host?.Log(message));
 
     private void Notify(string message) => OnUi(() => _host?.Notify(message));
+
+    private void OnProgress(ProgressState state) => OnUi(() =>
+    {
+        if (_host is null) return;
+        _lastProgress = state;
+        if (state.Message == "Starting WordLyrics") _autoShownForJob = false;
+        if (!_autoShownForJob && _host.Settings.GetBool("showProgress", true))
+        {
+            _autoShownForJob = true;
+            if (_progress is null) ShowProgress();
+        }
+        _progress?.Update(state);
+    });
+
+    private void ShowProgress()
+    {
+        if (_host is null) return;
+        if (_progress is not null) { _progress.Activate(); return; }
+        var host = _host;
+        var worker = _worker;
+        var configuredFolder = ReadOptions(host).Folder;
+        void Launch(bool setup) => Task.Run(() =>
+        {
+            if (_host is null) return;
+            try
+            {
+                var tool = new Tool(configuredFolder);
+                if (setup || !tool.Installed) tool.OpenSetup(host.DataDirectory);
+                else if (worker is not null) tool.OpenLibraryMenu(worker.SettingsFile);
+            }
+            catch (Exception ex) { Notify("WORDLYRICS_WINDOW_FAILED: " + ex.GetType().Name + ". Open WordLyrics from its desktop shortcut."); }
+        });
+        var window = _progress = new ProgressWindow(() => Launch(true), () => Launch(false), path => Task.Run(() =>
+        {
+            try { new Tool(configuredFolder).OpenResume(path); }
+            catch (Exception ex) { Notify("RESUME_OPEN_FAILED: " + ex.GetType().Name + ". Use WordLyrics > 7 Resume / fix unfinished jobs."); }
+        }));
+        window.Update(_lastProgress);
+        window.Closed += (_, _) => { if (ReferenceEquals(_progress, window)) _progress = null; };
+        var owner = (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.MainWindow;
+        if (owner is null) window.Show(); else window.Show(owner);
+    }
 
     private static void OnUi(Action action)
     {

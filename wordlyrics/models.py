@@ -117,7 +117,9 @@ def download(m, folder, progress=None, stop=None, urls=None, note=None, wait=5, 
                 except KeyboardInterrupt:
                     raise ModelError("stopped")
                 except Exception as e:
-                    last = "%s: %s" % (type(e).__name__, e) if not isinstance(e, ModelError) else str(e)
+                    from .network import explain
+                    code,message=explain(e)
+                    last = "[%s] %s" % (code,message) if not isinstance(e, ModelError) else str(e)
                     if note:
                         note("%s did not work (%s)" % (links.host(url), last))
                     if isinstance(e, ModelError) and "different file" in str(e):

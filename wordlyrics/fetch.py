@@ -45,6 +45,8 @@ class Client:
         self.provider_config = settings(config_path) if provider_config is None else dict(provider_config)
         self.provider_disabled = {}
         self.source_notes = []
+        self.network_failures = {}
+        self.recovery_notes = []
 
     def _cache(self, key):
         return os.path.join(self.cache_dir, hashlib.sha1(key.encode("utf-8")).hexdigest() + ".json")
@@ -53,17 +55,29 @@ class Client:
         """-> ('ok', data) | ('notfound', None) | ('error', message). Only ok / notfound are remembered."""
         url = API + endpoint + "?" + urllib.parse.urlencode(sorted(params.items()))
         cp = self._cache(url)
+        stale = None
         if os.path.exists(cp) and not self.refresh:
             try:
-                c = json.load(open(cp, encoding="utf-8"))
+                with open(cp,"rb") as file:
+                    raw=file.read(2_000_001)
+                if len(raw)>2_000_000:raise ValueError("oversized lyric cache")
+                c = json.loads(raw)
+                age=time.time()-c.get("ts",0)
+                if c.get("status")=="ok" and 0<=age<=90*86400:stale=c.get("data")
                 # "not there" is asked again after a month: the database keeps growing
                 lifetime = 7 * 86400 if c["status"] == "ok" else 86400
                 if time.time() - c.get("ts", 0) < lifetime:
                     return c["status"], c["data"]
             except Exception:
                 pass
-        err = ""
-        for attempt in range(3):
+        if "lrclib.net" in self.provider_disabled:
+            if stale is not None:
+                self.recovery_notes.append("CACHE_FALLBACK: using previously downloaded LRCLIB data; recording and timing checks still apply.")
+                return "ok",stale
+            return "error", self.provider_disabled["lrclib.net"]
+        from .network import explain
+        err, kind = "", "CONNECTION_FAILED"
+        for attempt in range(2):
             if stop is not None and stop.is_set():
                 return "error", "stopped"
             with self.lock:
@@ -73,7 +87,7 @@ class Client:
                 self.last = time.time()
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
-                with urllib.request.urlopen(req, timeout=30) as r:
+                with urllib.request.urlopen(req, timeout=12) as r:
                     raw = r.read(2_000_001)
                     if len(raw) > 2_000_000:
                         raise ValueError("lyrics service response too large")
@@ -81,29 +95,44 @@ class Client:
                 self._remember(cp, "ok", data)
                 self.interval = max(MIN_INTERVAL, self.interval * 0.9)
                 self.errors_in_a_row = 0
+                self.network_failures.pop("LRCLIB", None)
                 return "ok", data
             except urllib.error.HTTPError as e:
                 e.close()
                 if e.code == 404:
                     self._remember(cp, "notfound", None)
                     self.errors_in_a_row = 0
+                    self.network_failures.pop("LRCLIB", None)
                     return "notfound", None
-                err = "HTTP %d" % e.code
+                kind, message = explain(e)
+                err = "LRCLIB [%s]: %s" % (kind, message)
                 if e.code == 429:
                     self.interval = min(self.interval * 2, 30.0)
                     try:
                         pause = float(e.headers.get("Retry-After") or 0)
                     except ValueError:
                         pause = 0.0
-                    time.sleep(min(pause or 20 * (attempt + 1), 90))
+                    if stop is not None and stop.wait(min(pause or 2, 8)):
+                        return "error", "stopped"
+                    elif stop is None:
+                        time.sleep(min(pause or 2, 8))
                 elif 500 <= e.code < 600:
-                    time.sleep(3 * (attempt + 1))
+                    if stop is not None and stop.wait(1):
+                        return "error", "stopped"
                 else:
                     break
             except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
-                err = type(e).__name__
-                time.sleep(2 * (attempt + 1))
+                kind, message = explain(e)
+                err = "LRCLIB [%s]: %s" % (kind, message)
+                if stop is not None and stop.wait(1):
+                    return "error", "stopped"
         self.errors_in_a_row += 1
+        self.network_failures["LRCLIB"] = err
+        if self.errors_in_a_row >= 2 or kind in ("HTTP_401", "HTTP_403", "RATE_LIMIT", "TLS_FAILED"):
+            self.provider_disabled["lrclib.net"] = err
+        if stale is not None:
+            self.recovery_notes.append("CACHE_FALLBACK: using previously downloaded LRCLIB data; recording and timing checks still apply.")
+            return "ok",stale
         return "error", err
 
     def _remember(self, path, status, data):
@@ -334,7 +363,7 @@ def _lrclib_lookup(client, song, stop=None):
             break
     if not good:
         if errors and not near:
-            return None, "the lyrics service could not be reached"
+            return None, getattr(client, "network_failures", {}).get("LRCLIB", "the lyrics service could not be reached")
         if instrumental:
             return None, "listed as an instrumental"
         if near:

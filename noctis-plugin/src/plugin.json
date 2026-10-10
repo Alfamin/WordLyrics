@@ -1,7 +1,7 @@
 {
   "id": "dev.moshi.wordlyrics",
   "name": "WordLyrics",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": "moshi",
   "description": "Word-by-word lyrics for new songs, by themselves: when a song is added to a library folder (downloaded, copied, ripped), the WordLyrics program finds its lyrics and times every word in the background, and writes a .elrc file next to the song. Songs are only read. Needs the WordLyrics program on this computer; the switch below installs it.",
   "type": "dotnet",
@@ -55,11 +55,25 @@
       "description": "Flip this switch (either way). A window opens that downloads the program and its models (about 1.4 GB the first time) into the folder above and shows its progress. Nothing else on the computer is changed."
     },
     {
-      "key": "library",
-      "label": "Time the whole library",
+      "key": "showProgress",
+      "label": "Show progress when new songs are timed",
+      "type": "bool",
+      "default": true,
+      "description": "Opens a small WordLyrics window with the current stage, song count and errors. Closing it keeps the job running."
+    },
+    {
+      "key": "progress",
+      "label": "Open progress and last result",
       "type": "bool",
       "default": false,
-      "description": "Flip this switch (either way) to open WordLyrics on your first library folder: it makes a backup copy, then times every song that has no word-by-word lyrics yet."
+      "description": "Flip either way to show the current job or its last result and report."
+    },
+    {
+      "key": "library",
+      "label": "Generate timestamps / choose music folders",
+      "type": "bool",
+      "default": false,
+      "description": "Flip either way to open WordLyrics. One Noctis folder is selected automatically; with several folders you can select one, several, or all. Choose 1 to generate missing word timestamps."
     }
   ]
 }

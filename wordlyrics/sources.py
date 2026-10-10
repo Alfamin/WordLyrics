@@ -79,8 +79,6 @@ class SameHostRedirect(urllib.request.HTTPRedirectHandler):
 def request(client, provider, url, params=None, *, text=False, stop=None):
     """Bounded, cancellable, short-lived cache. Errors do not echo request URLs or response text."""
     from .fetch import UA
-    if provider in client.provider_disabled:
-        return "error", client.provider_disabled[provider]
     if stop is not None and stop.is_set():
         return "error", "stopped"
     if not safe_url(url):
@@ -89,6 +87,12 @@ def request(client, provider, url, params=None, *, text=False, stop=None):
         url += "?" + urllib.parse.urlencode(sorted(params.items()))
     key = hashlib.sha256((provider + "\0" + url).encode()).hexdigest()
     path = os.path.join(client.cache_dir, provider + "-" + key + ".json")
+    stale=None
+    def cached_fallback():
+        if stale is not None:
+            getattr(client,"recovery_notes",[]).append("CACHE_FALLBACK: using previously downloaded Genius data; recording and timing checks still apply.")
+            return "ok",stale
+        return None
     try:
         with open(path,"rb") as f:
             raw_cache=f.read(4_000_001)
@@ -97,10 +101,14 @@ def request(client, provider, url, params=None, *, text=False, stop=None):
         cached=json.loads(raw_cache)
         if not isinstance(cached,dict) or cached.get("status") not in ("ok","notfound"):
             raise ValueError("invalid cache object")
+        age=time.time()-float(cached.get("ts",0))
+        if cached.get("status")=="ok" and 0<=age<=90*86400:stale=cached.get("data")
         if not client.refresh and time.time() - float(cached.get("ts", 0)) < 86400:
             return cached["status"], cached["data"]
     except (OSError, ValueError, KeyError, TypeError):
         pass
+    if provider in client.provider_disabled:
+        return cached_fallback() or ("error",client.provider_disabled[provider])
     with client.lock:
         delay = max(0.0, .5 - (time.time() - client.last))
         if delay and (stop.wait(delay) if stop is not None else _wait(delay)):
@@ -116,6 +124,7 @@ def request(client, provider, url, params=None, *, text=False, stop=None):
                 return "error", "provider response is too large"
             data = raw.decode("utf-8", "replace") if text else json.loads(raw)
         client._remember(path, "ok", data)
+        getattr(client, "network_failures", {}).pop("Genius", None)
         return "ok", data
     except urllib.error.HTTPError as e:
         e.close()
@@ -123,12 +132,21 @@ def request(client, provider, url, params=None, *, text=False, stop=None):
             client._remember(path, "notfound", None)
             return "notfound", None
         if e.code in (401, 403, 429):
-            reason = "access unavailable" if e.code != 429 else "rate limit reached"
+            from .network import explain
+            code, message = explain(e)
+            reason = "Genius [%s]: %s" % (code, message)
             client.provider_disabled[provider] = reason
-            return "error", reason
-        return "error", "HTTP %d" % e.code
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-        return "error", "connection or response failed"
+            getattr(client, "network_failures", {})["Genius"] = reason
+            return cached_fallback() or ("error", reason)
+        from .network import explain
+        code, message = explain(e)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        from .network import explain
+        code, message = explain(e)
+    reason = "Genius [%s]: %s" % (code, message)
+    getattr(client, "network_failures", {})["Genius"] = reason
+    client.provider_disabled[provider] = reason
+    return cached_fallback() or ("error", reason)
 
 
 def _wait(seconds):

@@ -21,12 +21,14 @@ if defined WORDLYRICS_PYTHON (
     set "PYTHONPATH=%APP%"
     goto :run
 )
-if not exist "%PYDIR%\ready-%ENVV%.txt" (
-    call :setup
-    if errorlevel 1 goto :end
-)
+if not exist "%PY%" goto :prepare
+if not exist "%PYDIR%\ready-%ENVV%.txt" goto :prepare
+goto :run
+:prepare
+call :setup
+if errorlevel 1 goto :end
 :run
-"%PY%" -X utf8 -m wordlyrics %*
+"%PY%" -X utf8 -m wordlyrics.runner %*
 set "CODE=%ERRORLEVEL%"
 goto :end
 
@@ -49,6 +51,15 @@ if /i "%PROCESSOR_ARCHITECTURE%"=="x86" if not defined PROCESSOR_ARCHITEW6432 (
     exit /b 1
 )
 if exist "%PY%" goto :packages
+if exist "%PYDIR%" (
+    echo  The private Python is incomplete. Preserving it and rebuilding it.
+    "%SYS%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command "$p=[IO.Path]::GetFullPath($env:PYDIR); $a=[IO.Path]::GetFullPath($env:APP).TrimEnd('\'); if ([IO.Path]::GetDirectoryName($p) -ne $a -or [IO.Path]::GetFileName($p) -ne '.python' -or ((Get-Item -LiteralPath $p).Attributes -band [IO.FileAttributes]::ReparsePoint)) { exit 1 }; Move-Item -LiteralPath $p -Destination (Join-Path $a ('.python-damaged-'+[Guid]::NewGuid().ToString('N')))"
+    if errorlevel 1 (
+        echo  ENVIRONMENT_REPAIR_REFUSED: the private Python folder could not be preserved safely.
+        set "CODE=1"
+        exit /b 1
+    )
+)
 echo  Step 1 of 3: a portable Python ^(12 MB^)
 if not exist "%WORK%" mkdir "%WORK%"
 set "GOT="

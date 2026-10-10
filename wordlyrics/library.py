@@ -5,7 +5,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-AUDIO_EXT = {".mp3", ".flac", ".m4a", ".mp4", ".ogg", ".oga", ".opus", ".wav", ".aiff", ".aif", ".wma", ".aac", ".ape", ".wv"}
+AUDIO_EXT = {".mp3", ".flac", ".m4a", ".mp4", ".ogg", ".oga", ".opus", ".wav", ".aiff", ".aif", ".aifc", ".wma", ".aac", ".ape", ".wv", ".alac", ".asf", ".dsf", ".dff"}
 WORD_SIDECARS = (".lyricsfile", ".ttml")       # the player reads these before an .elrc
 NONE, INSTRUMENTAL, PLAIN, LINE, WORD = 0, 1, 2, 3, 4
 TIER_NAME = {NONE: "none", INSTRUMENTAL: "instrumental", PLAIN: "plain", LINE: "line-timed", WORD: "word-timed"}
@@ -327,10 +327,11 @@ def read_song(path, rel, size, *, redo=False, retime_mode="current", lyrics_file
     s = Song(path=path, rel=rel, size=size)
     base = s.base
     existing_word=None
+    with open(path,"rb") as readable:
+        readable.read(1)  # surface permissions before tag-reader fallback can hide them
     for ext in WORD_SIDECARS:
         if os.path.exists(base + ext):
-            s.skip = "already has a %s lyrics file" % ext
-            s.tier = WORD
+            s.skip = "player uses an existing %s file (protected; word timing not verified)" % ext
             return s
     if os.path.exists(base + ".elrc"):
         if not redo:
@@ -379,7 +380,7 @@ def read_song(path, rel, size, *, redo=False, retime_mode="current", lyrics_file
         s.tier, s.lyrics_from, s.text = best
     if redo:
         from .sources import plain_words
-        s.previous_tier=WORD if existing_word is not None else s.tier
+        s.previous_tier=classify(existing_word) if existing_word is not None else s.tier
         if retime_mode=="fresh":
             s.tier,s.text=NONE,""
         elif existing_word is not None:

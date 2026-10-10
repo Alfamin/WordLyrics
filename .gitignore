@@ -1,11 +1,18 @@
 .python/
+.python-damaged-*/
 .python-setup/
 models/
 runs/
 selections/
+backups/
+permission-repairs/
 source-choice backups/
 menu-settings.json
 __pycache__/
 speed test.json
 lyrics-providers.json
+diagnostics.json
+diagnostics.tmp
+**/telegram-defaults.private.json
+private-share/
 noctis-plugin/build/

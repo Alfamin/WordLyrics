@@ -59,9 +59,10 @@ function Invoke-WebRequest {
     Copy-Item -LiteralPath $package -Destination $OutFile
 }
 
-$names = @('WORDLYRICS_SOURCE','WORDLYRICS_DIR','WORDLYRICS_NO_START','WORDLYRICS_SHORTCUT_DIR','NOCTIS_DATA_DIR','WORDLYRICS_NO_EXTRAS','WORDLYRICS_NO_NOCTIS')
+$names = @('WORDLYRICS_SOURCE','WORDLYRICS_DIR','WORDLYRICS_NO_START','WORDLYRICS_SHORTCUT_DIR','NOCTIS_DATA_DIR','WORDLYRICS_NO_EXTRAS','WORDLYRICS_NO_NOCTIS','WORDLYRICS_PACKAGE','WORDLYRICS_FINDER_PACKAGE','WORDLYRICS_EXTRAS_DIR','WORDLYRICS_TELEGRAM_DEFAULTS_FILE')
 $saved = @{}; foreach ($name in $names) { $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 try {
+    $env:WORDLYRICS_PACKAGE=$null; $env:WORDLYRICS_FINDER_PACKAGE=$null; $env:WORDLYRICS_EXTRAS_DIR=$null; $env:WORDLYRICS_TELEGRAM_DEFAULTS_FILE=$null
     $scenarios = @('fresh','same','upgrade','newer','download-failure','wrong-package','missing-entry','no-extras','no-noctis','fallback')
     if ($TrueShufflePackage) { $scenarios += 'real-package' }
     foreach ($scenario in $scenarios) {
