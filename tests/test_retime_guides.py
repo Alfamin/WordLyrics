@@ -243,7 +243,8 @@ class AttemptRouting(unittest.TestCase):
 class WorkflowModes(unittest.TestCase):
     def test_song_action_two_uses_guides_and_advanced_scratch_is_explicit(self):
         with tempfile.TemporaryDirectory() as d:
-            m=menu.Menu(d,[],Mock(),reader=lambda _: '2',writer=Mock());m.job=Mock()
+            replies=iter(['2','0'])
+            m=menu.Menu(d,[],Mock(),reader=lambda _:next(replies),writer=Mock());m.job=Mock()
             s=L.Song('one.mp3','one.mp3')
             m.song_actions([s]);self.assertEqual(m.job.call_args.kwargs['mode_hint'],'current')
             root=Path(d)/'music';root.mkdir();answers=iter(['2','1'])

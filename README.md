@@ -85,6 +85,20 @@ title, artist, album and filename, across selected folders. Results show numbere
 close spelling suggestions are labelled. Select a song, then fresh automatic lookup, keep words and
 retime, choose Genius / LRCLIB / a text file, or edit/paste custom lyrics. The text editor works on a
 private draft; correcting a line does not modify the active lyrics until an approved timing run succeeds.
+Repair windows opened from Noctis stay open after a job: **0 Back** returns to the parent/main menu.
+Only **0 Exit** in the main menu ends the session, without an extra "press any key" pause. Active menu
+screens replace old output when terminal colors are supported; the last result/reason remains visible.
+For terminal paste, finish with **.done** on its own line; the instruction stays in the input prompt.
+Empty/whitespace lines are discarded. Before timing, a **Lyrics captured** panel shows the lyric-line
+count and how many usable timestamps were detected. Terminal paste and file input use the same guide
+parser. Plain text without compatible line guides still needs a successful global alignment.
+
+The manual LRCLIB picker searches the selected song's artist/title and exact duration first. It ranks
+close recording matches and synced results ahead of other versions, labels **duration** separately
+from **difference from your file**, and shows a small page at a time. **N/P** changes pages;
+**A Show other versions** reveals mismatched/alternative records with warnings. Broad name-only
+searches may contain entirely different songs, radio edits or records with inaccurate durations;
+those are not presented as the recommended recording matches.
 Custom synced LRC/ELRC inputs and manually chosen LRCLIB results retain valid **line** timestamps as
 rough guides; old word timestamps are always recalculated by the model. The app and terminal editors
 keep the visible line guides. A small plain-text correction can reuse existing guides only when line

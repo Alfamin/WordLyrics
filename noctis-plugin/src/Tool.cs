@@ -26,7 +26,7 @@ internal sealed class Tool
     public bool Installed => File.Exists(Bat);
 
     /// <summary>The first WordLyrics that can be given single songs and reports what it did with them.</summary>
-    private static readonly Version Needed = new(1, 6, 1);
+    private static readonly Version Needed = new(1, 6, 2);
 
     /// <summary>Installed, but from before it could be handed single songs.</summary>
     public bool TooOld

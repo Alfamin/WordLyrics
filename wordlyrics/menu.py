@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor,as_completed
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import shutil
@@ -69,6 +70,7 @@ class Menu:
         self.folder_notes=[]
         self.scan_unreadable={}
         self.last_job_code=0
+        self.last_notice=""
         self.color=writer is None and _enable_ansi() and not os.environ.get("NO_COLOR")
         try:
             data=json.loads(self.preferences.read_text(encoding="utf-8"))
@@ -110,8 +112,9 @@ class Menu:
             more=[p for p in found if not any(backup.inside(p,selected) for selected in self.selected_roots)]
             if more:self.folder_notes.append("Noctis has %d other folder%s. Choose 4 to include them." % (len(more),"" if len(more)==1 else "s"))
 
-    def panel(self,title,body=""):
-        line="="*64
+    def panel(self,title,body="",fresh=False):
+        if fresh and self.color:self.say("\033[2J\033[H")
+        line="─"*min(68,max(36,shutil.get_terminal_size((80,24)).columns-4))
         heading="\n%s\n  %s\n%s" % (line,title,line)
         self.say(("\033[1;36m"+heading+"\033[0m") if self.color else heading)
         if body:self.say(body)
@@ -289,24 +292,36 @@ class Menu:
                     self.say("Choose a number shown in this result list.")
 
     def song_actions(self,songs):
-        if not songs:return
-        self.panel("SELECTED SONGS", "\n".join("  "+((s.artist+" - ") if s.artist else "")+(s.title or s.name) for s in songs))
-        self.say("\n  [1] WRONG LYRICS / REDO WITH FRESH LYRICS\n  [2] Keep the words; redo their timing\n  [3] Choose Genius, LRCLIB or a lyric file (one song)\n  [4] Show file / lyric details\n  [5] EDIT OR PASTE CUSTOM LYRICS (one song)\n  [0] Back")
-        action=self.ask("> ")
-        if action=="1":self.job(songs,redo=True,mode_hint="fresh",repair_lyrics=True)
-        elif action=="2":self.job(songs,redo=True,mode_hint="current")
-        elif action=="3":
-            if len(songs)!=1:self.say("Select one song to choose its source.")
-            else:self.source_choice(selected_song=songs[0])
-        elif action=="4":
-            for s in songs:self.say("%s\n  Artist: %s | Title: %s\n  Lyrics: %s" % (s.path,s.artist or "unknown",s.title or s.name,self.status(s)))
-        elif action=="5":
-            if len(songs)!=1:self.say("Select one song to edit its lyrics.")
-            else:self.custom_lyrics(songs[0])
+        while songs:
+            self.panel("REPAIR SONG", "\n".join("  "+((s.artist+" - ") if s.artist else "")+(s.title or s.name) for s in songs),fresh=True)
+            if self.last_notice:self.say("\n  Last result: "+self.last_notice)
+            self.say("\n  [1] Fetch fresh lyrics and redo\n  [2] Keep words and redo timing\n  [3] Choose a lyric source / file\n  [4] Show song details\n  [5] Edit or paste custom lyrics\n\n  [0] Back to main menu")
+            action=self.ask("> ")
+            if action=="0":return
+            if action=="1":self.job(songs,redo=True,mode_hint="fresh",repair_lyrics=True)
+            elif action=="2":self.job(songs,redo=True,mode_hint="current")
+            elif action=="3":
+                if len(songs)!=1:self.last_notice="Select one song to choose its source."
+                else:self.source_choice(selected_song=songs[0])
+            elif action=="4":
+                self.panel("SONG DETAILS",fresh=True)
+                for s in songs:self.say("%s\n  Artist: %s | Title: %s\n  Lyrics: %s" % (s.path,s.artist or "unknown",s.title or s.name,self.status(s)))
+                self.ask("Enter or 0 to go back")
+            elif action=="5":
+                if len(songs)!=1:self.last_notice="Select one song to edit its lyrics."
+                else:self.custom_lyrics(songs[0])
+            else:self.last_notice="Choose a number shown in this menu."
+            refreshed=[]
+            for s in songs:
+                if os.path.isfile(s.path):
+                    try:s=L.read_song(s.path,s.rel,os.path.getsize(s.path),redo=True,repair_lyrics=True,ignore_source=True)
+                    except OSError:pass
+                refreshed.append(s)
+            songs=refreshed
 
     def custom_lyrics(self,song):
         from . import drafts
-        self.panel("EDIT / PASTE LYRICS", "Work on a private draft. The song and existing lyrics are unchanged until timing succeeds.")
+        self.panel("EDIT / PASTE LYRICS", "Work on a private draft. Existing lyrics stay active until timing succeeds.",fresh=True)
         self.say("  [1] Open current words in a text editor\n  [2] Paste the full lyrics here\n  [3] Use an existing lyric text file\n  [0] Back")
         action=self.ask("> ")
         if action=="1":
@@ -316,13 +331,19 @@ class Menu:
             except OSError as e:self.say(str(e))
             if self.ask("1 Use the saved draft and review timing   0 Keep draft for later: ")!="1":return
         elif action=="2":
-            self.say("Paste complete lyrics, then enter .done on a line by itself. .cancel cancels. Nothing is echoed in reports.")
+            self.panel("PASTE LYRICS", "Paste plain text or synced LRC. Blank lines are ignored.",fresh=True)
+            finish="When finished: type .done then Enter. Type .cancel to go back."
+            self.say(("\033[1;33m"+finish+"\033[0m") if self.color else finish)
             lines=[];length=0
             while True:
-                try:line=self.read("  Lyrics > ")
-                except (EOFError,KeyboardInterrupt):return
+                try:line=self.read("  Line %d | .done to finish > " % (len(lines)+1))
+                except EOFError:
+                    if lines:break
+                    return
+                except KeyboardInterrupt:return
                 if line.strip()==".cancel":return
                 if line.strip()==".done":break
+                if not line.strip():continue
                 length+=len(line)
                 if length>500_000:self.say("Lyrics are too large; use a normal song text file.");return
                 lines.append(line)
@@ -333,21 +354,51 @@ class Menu:
         else:return
         if not os.path.isfile(path) or os.path.islink(path):self.say("Choose an existing, unlinked text file.");return
         if not L._read_text(path).strip():self.say("The draft is empty. Paste the full lyrics, save it, then choose it as a lyric text file.");return
+        from . import guides
+        pasted=L._read_text(path);timed,why=guides.rows(pasted,song.seconds)
+        self.panel("LYRICS CAPTURED", "%d lyric lines | %d usable line timestamps" % (len(guides.words(pasted).splitlines()),len(timed)),fresh=True)
+        if timed:self.say("Supplied line guides will be used; word timing is recalculated.")
+        else:
+            preview=L.read_song(song.path,song.rel,os.path.getsize(song.path),redo=True,lyrics_file=path,repair_lyrics=True,ignore_source=True)
+            if preview.tier==L.LINE:
+                self.say("Using %d existing compatible line guides for these words; word timing is recalculated." % len(guides.rows(preview.text,preview.seconds)[0]))
+            else:self.say("No compatible line guides: "+why+". Plain alignment may need synced lyrics for this recording.")
         self.job([song],redo=True,lyrics_file=os.path.abspath(path),mode_hint="current",repair_lyrics=True,automatic=False)
 
     def lrclib_choice(self,song):
         from . import drafts
         query=self.ask("LRCLIB song / artist search (Enter uses this song; 0 back): ",numbers=False)
         if query=="0":return
-        query=query or ((song.artist+" "+(song.title or song.name)).strip())
-        self.panel("SEARCHING LRCLIB", "Provider timestamps will be discarded; WordLyrics will time the selected words itself.")
-        rows=drafts.lrclib_results(str(self.home),song,query)
-        if not rows:self.say("No usable uncensored lyric results. Try Genius or custom lyrics.");return
-        for i,row in enumerate(rows,1):
-            self.say("  [%d] %s - %s | %s | %ss%s" % (i,row.get("artistName",""),row.get("trackName",""),row.get("albumName",""),row.get("duration","?"),(" | CHECK: "+row["warning"]) if row["warning"] else ""))
-        chosen=selection(self.ask("One result number (0 back): "),len(rows))
-        if len(chosen)!=1:return
-        row=rows[chosen[0]]
+        self.panel("SEARCHING LRCLIB", "Matching this recording. Valid line guides are retained; word timing is recalculated.",fresh=True)
+        try:rows=drafts.lrclib_results(str(self.home),song,query)
+        except OSError as e:self.last_notice="LRCLIB search failed: "+str(e);return
+        if not rows:self.last_notice="No usable uncensored LRCLIB results. Try Genius or custom lyrics.";return
+        best=[row for row in rows if row["recording_match"] or row["near_match"]]
+        alternate=False;page=0
+        page_size=max(2,min(5,(shutil.get_terminal_size((80,24)).lines-12)//4))
+        label=lambda value:re.sub(r"[\x00-\x1f\x7f]"," ",str(value))[:100]
+        while True:
+            visible=rows if alternate else best
+            pages=max(1,(len(visible)+page_size-1)//page_size);page=min(page,pages-1)
+            start=page*page_size
+            self.panel("LRCLIB RESULTS", "Your file: %s (%.1f seconds)" % (duration(song.seconds),song.seconds),fresh=True)
+            if not visible:self.say("No close recording matches. Other versions may have a very different length.")
+            else:self.say("%d results | page %d / %d" % (len(visible),page+1,pages))
+            for i,row in enumerate(visible[start:start+page_size],start+1):
+                offset=row["seconds_off"]
+                difference="difference unknown" if offset is None else "difference %.1fs" % offset
+                kind="synced lines" if row["synced"] else "plain words"
+                self.say("\n  [%d] %s - %s\n      %s | %s | %s\n      Album: %s%s" % (i,label(row.get("artistName","")),label(row.get("trackName","")),str(row.get("duration","?"))+"s",difference,kind,label(row.get("albumName","")),(" | CHECK: "+row["warning"]) if row["warning"] else ""))
+            self.say("\n  [N/P] Next / previous page\n  [A] %s\n  [0] Back" % ("Show closest matches" if alternate else "Show other versions / results"))
+            reply=self.ask("Choose one result, A, or 0")
+            if reply=="0":return
+            if reply.lower()=="a":alternate=not alternate;page=0;continue
+            if reply.lower()=="n":page=min(page+1,pages-1);continue
+            if reply.lower()=="p":page=max(0,page-1);continue
+            try:chosen=selection(reply,len(visible))
+            except ValueError:continue
+            if len(chosen)!=1:continue
+            row=visible[chosen[0]];break
         path=drafts.create(str(self.home),song,row["chosen_text"],label="LRCLIB")
         self.say("Selected LRCLIB words saved as a private draft: "+path)
         self.job([song],redo=True,lyrics_file=path,mode_hint="current",repair_lyrics=True,automatic=False)
@@ -366,7 +417,7 @@ class Menu:
             if lyrics_file:self.job([song],redo=True,lyrics_file=lyrics_file,mode_hint="current",repair_lyrics=True,automatic=False)
             else:self.song_actions([song])
             return self.last_job_code
-        except (OSError,ValueError) as e:self.panel("SONG NEEDS ATTENTION",str(e));return 1
+        except (OSError,ValueError) as e:self.last_notice=str(e);self.panel("SONG NEEDS ATTENTION",str(e));return 1
 
     def history(self):
         result={}
@@ -455,6 +506,9 @@ class Menu:
                 data=json.loads(result.read_text(encoding="utf-8"))
                 summary=data["summary"]
                 self.panel("RESULT", summary["message"])
+                self.last_notice=summary["message"]
+                first_problem=next((item.get("reason") for item in data.get("songs",[]) if item.get("reason") and item.get("status") in FAILURES),"")
+                if first_problem:self.last_notice += "\n    Reason: "+first_problem.split(". ")[0]
                 total_timed += summary["timed"]
                 total_attention += summary["needs_attention"]
                 if data.get("error"):self.say(data["error"])
@@ -464,6 +518,7 @@ class Menu:
                 self.say("Report: "+str(report_path))
                 if repair_lyrics and summary["timed"]:self.say("In Noctis, select another song and return to this song to reload its new lyrics.")
             except (OSError,ValueError,KeyError,TypeError):
+                self.last_notice="Run returned status %s without a result summary. Success has not been confirmed; read its report." % code
                 self.panel("RESULT", "The run returned status %s. No result summary was available; read the messages above. Success has not been confirmed." % code)
                 if code:total_attention += len(paths)
             if code==130:break
@@ -657,7 +712,8 @@ class Menu:
 
     def run(self):
         while True:
-            self.panel("WORDLYRICS %s" % __version__, "Word-by-word lyrics for your music")
+            self.panel("WORDLYRICS %s" % __version__, "Word-by-word lyrics for your music",fresh=True)
+            if self.last_notice:self.say("\n  Last result: "+self.last_notice)
             for p in self.selected_roots:self.say("  Music: "+p)
             if not self.selected_roots:self.say("  Music folders will be detected from Noctis when you start.")
             for note in self.folder_notes:self.say("  "+note)

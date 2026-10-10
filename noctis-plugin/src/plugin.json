@@ -1,7 +1,7 @@
 {
   "id": "dev.moshi.wordlyrics",
   "name": "WordLyrics",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "author": "moshi",
   "description": "Word-by-word lyrics for new songs, by themselves: when a song is added to a library folder (downloaded, copied, ripped), the WordLyrics program finds its lyrics and times every word in the background, and writes a .elrc file next to the song. Songs are only read. Needs the WordLyrics program on this computer; the switch below installs it.",
   "type": "dotnet",

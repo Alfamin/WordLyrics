@@ -39,7 +39,7 @@ internal static class WorkflowTests
     {
         var app = Path.Combine(_root, "tool");
         var module = Path.Combine(app, "wordlyrics"); Directory.CreateDirectory(module);
-        File.WriteAllText(Path.Combine(module, "__init__.py"), "__version__ = \"1.6.1\"\n");
+        File.WriteAllText(Path.Combine(module, "__init__.py"), "__version__ = \"1.6.2\"\n");
         File.WriteAllText(Path.Combine(app, "WordLyrics.bat"), "@echo off\r\nexit /b 99\r\n");
         File.WriteAllText(Path.Combine(module, "runner.py"), "import runpy\nrunpy.run_module('wordlyrics',run_name='__main__')\n");
         File.WriteAllText(Path.Combine(module, "__main__.py"), """
@@ -70,9 +70,9 @@ internal static class WorkflowTests
         foreach (var name in new[] { "firststart.py", "menu.py", "library.py", "repair.py", "drafts.py", "search.py", "guides.py" }) File.WriteAllText(Path.Combine(module,name),"# fixture");
         File.WriteAllText(Path.Combine(app,"requirements.txt"),"# fixture");
         Check(!tool.SetupText().Contains("irm https://") && tool.SetupText().Contains("Reusing the installed"), "complete local setup does not fetch GitHub's installer again");
-        File.WriteAllText(Path.Combine(module, "__init__.py"), "__version__ = \"1.6.0\"\n");
-        Check(tool.TooOld && tool.SetupText().Contains("irm https://"), "old backend with timestamp stripping must update before new editor/repair work");
         File.WriteAllText(Path.Combine(module, "__init__.py"), "__version__ = \"1.6.1\"\n");
+        Check(tool.TooOld && tool.SetupText().Contains("irm https://"), "old backend with timestamp stripping must update before new editor/repair work");
+        File.WriteAllText(Path.Combine(module, "__init__.py"), "__version__ = \"1.6.2\"\n");
         File.Delete(Path.Combine(module,"guides.py"));
         Check(tool.SetupText().Contains("irm https://"), "missing line-guide component is not treated as complete offline setup");
         File.WriteAllText(Path.Combine(module,"guides.py"),"# fixture");
@@ -152,7 +152,7 @@ internal static class WorkflowTests
         window.Close();
         var host = new Host(Path.Combine(_root, "ui", "plugin-data", "dev.moshi.wordlyrics"));
         var plugin = new WordLyricsPlugin(); plugin.Initialize(host);
-        Check(host.Commands == 3 && plugin.Info.Version == "1.2.1", "plugin registers timing, repair and custom editor without launching work");
+        Check(host.Commands == 3 && plugin.Info.Version == "1.2.2", "plugin registers timing, repair and custom editor without launching work");
         host.Raise("progress"); Dispatcher.UIThread.RunJobs();
         var panel = Field<ProgressWindow>(plugin, "_progress");
         Check(panel.IsVisible, "progress can be opened from settings");

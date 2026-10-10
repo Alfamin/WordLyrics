@@ -31,7 +31,7 @@
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
     $Repo = 'Alfamin/WordLyrics'
-    $ProgramVersion = '1.6.1'
+    $ProgramVersion = '1.6.2'
     $Sources = @(
         "https://github.com/$Repo/archive/refs/heads/main.zip",
         "https://codeload.github.com/$Repo/zip/refs/heads/main"

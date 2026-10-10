@@ -29,7 +29,7 @@ $source = Join-Path $script:testRoot 'source\WordLyrics-main'
 New-Item -ItemType Directory -Path (Join-Path $source 'wordlyrics'),(Join-Path $source 'noctis-plugin') | Out-Null
 '@echo off' | Set-Content -LiteralPath (Join-Path $source 'WordLyrics.bat') -Encoding ascii
 'fixture app' | Set-Content -LiteralPath (Join-Path $source 'wordlyrics\__main__.py') -Encoding utf8
-'__version__ = "1.6.1"' | Set-Content -LiteralPath (Join-Path $source 'wordlyrics\__init__.py') -Encoding ascii
+'__version__ = "1.6.2"' | Set-Content -LiteralPath (Join-Path $source 'wordlyrics\__init__.py') -Encoding ascii
 'fixture requirements' | Set-Content -LiteralPath (Join-Path $source 'requirements.txt') -Encoding ascii
 foreach ($name in @('runner','menu','repair','drafts','search')) { 'fixture module' | Set-Content -LiteralPath (Join-Path $source ('wordlyrics\'+$name+'.py')) -Encoding ascii }
 '{}' | Set-Content -LiteralPath (Join-Path $source 'lyrics-providers.example.json') -Encoding ascii

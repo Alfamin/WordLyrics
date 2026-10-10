@@ -123,6 +123,12 @@ set "GOT=1"
 exit /b 0
 
 :end
+rem A completed interactive menu already asked the user to Exit; no second pause is needed.
+if "%CODE%"=="0" if "%~1"=="" goto :close
+if "%CODE%"=="0" if /i "%~1"=="menu" goto :close
+if "%CODE%"=="0" if /i "%~1"=="repair-song" goto :close
+if "%CODE%"=="0" if /i "%~1"=="launch" goto :close
 rem keep the window open when started by double-click or drag and drop
 if not defined WORDLYRICS_NO_PAUSE echo %CMDCMDLINE% | "%SYS%\find.exe" /i "%~nx0" >nul && pause
+:close
 endlocal & exit /b %CODE%

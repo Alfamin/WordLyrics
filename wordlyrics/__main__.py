@@ -297,12 +297,16 @@ def _main(argv=None):
         if len(argv)!=2 and not (len(argv)==4 and argv[2]=="--lyrics-file"):
             print("Choose one song from Noctis or WordLyrics > Search / fix a song.");return 2
         from .menu import Menu
-        return Menu(HOME,[],main).repair_path(argv[1],lyrics_file=argv[3] if len(argv)==4 else None)
+        session=Menu(HOME,[],main)
+        session.repair_path(argv[1],lyrics_file=argv[3] if len(argv)==4 else None)
+        return session.run()  # Back returns to a parent menu; only explicit Exit ends the session
     if argv[:1]==["resume"]:
         if len(argv)!=2:
             print("Choose a saved job in WordLyrics > Resume / fix unfinished jobs.");return 2
         from .menu import Menu
-        return Menu(HOME,[],main).resume_job(argv[1])
+        session=Menu(HOME,[],main)
+        session.resume_job(argv[1])
+        return session.run()
     if argv[:1] == ["check"]:
         if already_running():
             print("WordLyrics is busy. Check the installation after the current run.")
