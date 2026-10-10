@@ -129,7 +129,7 @@ internal sealed class Worker : IDisposable
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return "The song's file is not there.";
         if (!Audio.Contains(Path.GetExtension(path))) return "WordLyrics cannot read this kind of file.";
-        if (HasWordLyrics(path)) return "An existing .elrc/.ttml/.lyricsfile is protected. Open Generate timestamps > Songs to check its timing or safely repair an .elrc file.";
+        if (HasWordLyrics(path)) return "A lyric file already exists. To fix wrong words or timing, right-click this song and choose Wrong lyrics / redo with fresh lyrics (WordLyrics), or Edit / paste custom lyrics.";
         var tool = new Tool(Options.Folder);
         if (!tool.Ready) return NotReady(tool);
 

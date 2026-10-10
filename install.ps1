@@ -18,6 +18,8 @@
 #   $env:WORDLYRICS_FINDER_PACKAGE = 'C:\path\Finder.zip' use an existing Free Music Finder package
 #   $env:WORDLYRICS_EXTRAS_DIR = 'C:\path\plugins'     local optional ZIPs named by plugin id
 #   $env:WORDLYRICS_TELEGRAM_DEFAULTS_FILE = 'C:\path\telegram-defaults.private.json'  private defaults, never public
+#   $env:WORDLYRICS_OFFLINE_INSTALL = '1'  use installed/supplied files, no network or automatic first-start downloads
+#   $env:WORDLYRICS_REPAIR_INSTALL = '1'   explicitly refetch same-version program/plugin files for repair
 #
 # If the Noctis music player is on this computer, four plugins are put into Noctis' plugins folder and
 # kept up to date by running the line again: WordLyrics (times new songs by itself), Lyric Motion
@@ -29,6 +31,7 @@
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
     $Repo = 'Alfamin/WordLyrics'
+    $ProgramVersion = '1.6.0'
     $Sources = @(
         "https://github.com/$Repo/archive/refs/heads/main.zip",
         "https://codeload.github.com/$Repo/zip/refs/heads/main"
@@ -43,13 +46,13 @@
 
     # the other Noctis plugins this line keeps up to date (each from its own repository)
     $Extras = @(
-        @{ Name = 'Lyric Motion'; Id = 'dev.moshi.lyricmotion'; Urls = @(
+        @{ Name = 'Lyric Motion'; Id = 'dev.moshi.lyricmotion'; Manifest = 'https://raw.githubusercontent.com/Alfamin/LyricMotion/main/src/plugin.json'; Urls = @(
             'https://github.com/Alfamin/LyricMotion/raw/main/LyricMotion-for-Noctis.zip',
             'https://raw.githubusercontent.com/Alfamin/LyricMotion/main/LyricMotion-for-Noctis.zip') },
-        @{ Name = 'Free Music Finder'; Id = 'dev.moshi.freemusicfinder'; Urls = @(
+        @{ Name = 'Free Music Finder'; Id = 'dev.moshi.freemusicfinder'; Manifest = 'https://raw.githubusercontent.com/Alfamin/noctic-download-plugin/main/FreeMusicFinder/plugin.json'; Urls = @(
             'https://github.com/Alfamin/noctic-download-plugin/raw/main/dist/FreeMusicFinder.zip',
             'https://raw.githubusercontent.com/Alfamin/noctic-download-plugin/main/dist/FreeMusicFinder.zip') },
-        @{ Name = 'True Shuffle'; Id = 'dev.moshi.trueshuffle'; Urls = @(
+        @{ Name = 'True Shuffle'; Id = 'dev.moshi.trueshuffle'; Manifest = 'https://raw.githubusercontent.com/Alfamin/TrueShuffle/main/src/plugin.json'; Urls = @(
             'https://github.com/Alfamin/TrueShuffle/raw/main/dist/TrueShuffle-for-Noctis.zip',
             'https://raw.githubusercontent.com/Alfamin/TrueShuffle/main/dist/TrueShuffle-for-Noctis.zip') }
     )
@@ -65,6 +68,87 @@
     $installedNoctis = $false
     $noctisExe = $null
     $InstalledNoctisVersion = $null
+
+    function Test-InstalledProgram {
+        if ($env:WORDLYRICS_REPAIR_INSTALL -eq '1' -or $env:WORDLYRICS_SOURCE) { return $false }
+        try {
+            $stamp = Join-Path $Dest 'installation.json'
+            if (-not (Test-Path -LiteralPath $stamp -PathType Leaf) -or (Get-Item -LiteralPath $stamp).Length -gt 65536 -or ((Get-Item -LiteralPath $stamp).Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+            $record = [IO.File]::ReadAllText($stamp) | ConvertFrom-Json
+            if ([version]$record.version -lt [version]$ProgramVersion) { return $false }
+            $required = @('WordLyrics.bat','requirements.txt','wordlyrics\__main__.py','wordlyrics\runner.py','wordlyrics\menu.py','wordlyrics\repair.py','wordlyrics\drafts.py','wordlyrics\search.py','noctis-plugin\WordLyrics-for-Noctis.zip')
+            $properties = @($record.files.PSObject.Properties)
+            if ($properties.Count -gt 100 -or $properties.Count -lt $required.Count) { return $false }
+            foreach ($name in $required) { if (-not ($properties.Name -contains $name)) { return $false } }
+            $prefix = [IO.Path]::GetFullPath($Dest).TrimEnd('\') + '\'
+            foreach ($item in $properties) {
+                $path = [IO.Path]::GetFullPath((Join-Path $Dest $item.Name))
+                if (-not $path.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or
+                    -not (Test-Path -LiteralPath $path -PathType Leaf) -or
+                    ((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                    (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ine $item.Value) { return $false }
+            }
+            return $true
+        } catch { return $false }
+    }
+
+    function Save-InstalledProgram {
+        $hashes = [ordered]@{}
+        $paths = @('WordLyrics.bat','requirements.txt','install.ps1','noctis-plugin\WordLyrics-for-Noctis.zip')
+        $paths += @(Get-ChildItem -LiteralPath (Join-Path $Dest 'wordlyrics') -File | Where-Object { $_.Extension -in @('.py','.ps1') } | ForEach-Object { 'wordlyrics\' + $_.Name })
+        foreach ($name in $paths) {
+            $path = Join-Path $Dest $name
+            if (Test-Path -LiteralPath $path -PathType Leaf) { $hashes[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
+        }
+        $version = [regex]::Match([IO.File]::ReadAllText((Join-Path $Dest 'wordlyrics\__init__.py')), '__version__\s*=\s*"([0-9.]+)"').Groups[1].Value
+        $json = @{ version=$version; files=$hashes } | ConvertTo-Json -Depth 4
+        [IO.File]::WriteAllText((Join-Path $Dest 'installation.json'),$json,(New-Object Text.UTF8Encoding($false)))
+    }
+
+    function Keep-InstalledExtra($extra) {
+        if ($env:WORDLYRICS_REPAIR_INSTALL -eq '1') { return $false }
+        $pluginFolder = Join-Path (Join-Path $noctis 'plugins') $extra.Id
+        try {
+            $old = Get-Content -LiteralPath (Join-Path $pluginFolder 'plugin.json') -Raw | ConvertFrom-Json
+            $entry = [string]$old.entry
+            if ($old.id -ne $extra.Id -or -not (Test-PluginFiles $pluginFolder $old)) { return $false }
+            if ($env:WORDLYRICS_OFFLINE_INSTALL -eq '1') { Write-Host " $($extra.Name): installed $($old.version); offline mode keeps it."; return $true }
+            $metadata = Join-Path $Work ($extra.Id + '-version.json')
+            try {
+                Invoke-WebRequest -UseBasicParsing -Uri $extra.Manifest -OutFile $metadata -TimeoutSec 8
+                if ((Get-Item -LiteralPath $metadata).Length -gt 65536) { throw 'metadata too large' }
+                $new = Get-Content -LiteralPath $metadata -Raw | ConvertFrom-Json
+                if ($new.id -ne $extra.Id) { throw 'unexpected metadata' }
+                if ([version]$old.version -ge [version]$new.version) { Write-Host " $($extra.Name): $($old.version) is current; ZIP download skipped."; return $true }
+                return $false
+            } catch {
+                Write-Host (" $($extra.Name): installed $($old.version) kept. Update check unavailable: " + (Explain-Download $_)) -ForegroundColor Yellow
+                return $true
+            }
+        } catch { return $false }
+    }
+
+    function Test-PluginFiles($pluginFolder,$info) {
+        try {
+            $entry = [string]$info.entry
+            if (-not $entry -or $entry -notlike '*.dll' -or [IO.Path]::GetFileName($entry) -ne $entry -or -not (Test-Path -LiteralPath (Join-Path $pluginFolder $entry) -PathType Leaf)) { return $false }
+            $stamp = Join-Path $pluginFolder 'wordlyrics-installed-files.json'
+            if (-not (Test-Path -LiteralPath $stamp)) { return $true } # installed directly by Noctis: at least check the entry DLL
+            $file = Get-Item -LiteralPath $stamp
+            if ($file.Length -gt 65536 -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+            $record = Get-Content -LiteralPath $stamp -Raw | ConvertFrom-Json
+            if ($record.version -ne $info.version) { return $true } # another installer updated it; stale hashes must not force a downgrade
+            $items = @($record.files.PSObject.Properties)
+            if ($items.Count -gt 100 -or -not ($items.Name -contains $entry)) { return $false }
+            $prefix = [IO.Path]::GetFullPath($pluginFolder).TrimEnd('\') + '\'
+            foreach ($item in $items) {
+                $path = [IO.Path]::GetFullPath((Join-Path $pluginFolder $item.Name))
+                if (-not $path.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $path -PathType Leaf) -or
+                    ((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint) -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ine $item.Value) { return $false }
+            }
+            return $true
+        } catch { return $false }
+    }
 
     function Noctis-Version($path) {
         if (-not $path) { return $null }
@@ -109,6 +193,10 @@
     function Offer-Noctis {
         if ($env:WORDLYRICS_NO_NOCTIS) { return }
         $found = Find-Noctis
+        if ($env:WORDLYRICS_OFFLINE_INSTALL -eq '1') {
+            Write-Host ' Noctis: offline setup keeps the installed player; no installer download.'
+            return $found
+        }
         $oldVersion = Noctis-Version $found
         if ($found -and (-not $oldVersion -or $oldVersion -ge [version]$NoctisRelease.Version)) { return $found }
         # An explicitly named portable/test data folder is already a user choice.
@@ -202,7 +290,13 @@
             if ($null -ne $old) {
                 $newer = $true
                 try { $newer = [version]$info.version -gt [version]$old } catch { $newer = $info.version -ne $old }
-                if (-not $newer) { return " Noctis plugin `"$name`": $old is in place, nothing to update." }
+                $oldEntryPresent = $false
+                try {
+                    $oldInfo = Get-Content -LiteralPath $oldAbout -Raw | ConvertFrom-Json
+                    $oldEntry = [string]$oldInfo.entry
+                    $oldEntryPresent = Test-PluginFiles $pluginHome $oldInfo
+                } catch { }
+                if (-not $newer -and ($info.version -ne $old -or ($oldEntryPresent -and $env:WORDLYRICS_REPAIR_INSTALL -ne '1'))) { return " Noctis plugin `"$name`": $old is in place, nothing to update." }
             }
             New-Item -ItemType Directory -Force -Path $pluginHome | Out-Null
             # plugin.json goes last: if a file is in use (Noctis is open), the old version number stays
@@ -214,6 +308,11 @@
                     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $to) | Out-Null
                     Copy-Item -LiteralPath $f.FullName -Destination $to -Force
                 }
+                $installedFiles = [ordered]@{}
+                foreach ($f in $files) { $installedFiles[$f.FullName.Substring($unpacked.Length + 1)] = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash }
+                $installedFiles['plugin.json'] = (Get-FileHash -LiteralPath $about -Algorithm SHA256).Hash
+                $record = @{ version=$info.version;files=$installedFiles } | ConvertTo-Json -Depth 4
+                [IO.File]::WriteAllText((Join-Path $pluginHome 'wordlyrics-installed-files.json'),$record,(New-Object Text.UTF8Encoding($false)))
                 Copy-Item -LiteralPath $about -Destination $oldAbout -Force
             } catch {
                 if ($null -ne $old) { return " Noctis plugin `"$name`": $($info.version) could not replace $old (is Noctis open? close it and run this line again)." }
@@ -243,15 +342,17 @@
         $noctisThere = -not $env:WORDLYRICS_NO_NOCTIS -and ([bool]$noctisExe -or $noctisThere)
         if ($noctisThere) { New-Item -ItemType Directory -Force -Path $noctis | Out-Null }
         Show-Step 'INSTALL WORDLYRICS'
-        $got = $false
-        if ($env:WORDLYRICS_PACKAGE) {
+        $reuseProgram = Test-InstalledProgram
+        $got = $reuseProgram
+        if ($reuseProgram) { Write-Host ' WordLyrics is already installed and its program files verify. Program ZIP download skipped.'; $src = $Dest }
+        if (-not $reuseProgram -and $env:WORDLYRICS_PACKAGE) {
             $localPackage = Get-Item -LiteralPath $env:WORDLYRICS_PACKAGE
             if ($localPackage.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'LOCAL_PACKAGE_INVALID: choose an original ZIP file rather than a link.' }
             Copy-Item -LiteralPath $env:WORDLYRICS_PACKAGE -Destination $Zip
             Write-Host ' Using the program package supplied with this installer.'
             $got = $true
         }
-        foreach ($u in $(if ($got) { @() } else { $Sources })) {
+        foreach ($u in $(if ($got -or $env:WORDLYRICS_OFFLINE_INSTALL -eq '1') { @() } else { $Sources })) {
             try {
                 Write-Host " Downloading the program from $(([Uri]$u).Host) ..."
                 Invoke-WebRequest -UseBasicParsing -Uri $u -OutFile $Zip -TimeoutSec 120
@@ -262,10 +363,10 @@
             }
         }
         if (-not $got) {
-            Write-Host ' The program could not be downloaded. Check the internet connection and try again.'
+            Write-Host ' SETUP_FILES_MISSING: no verified installed program or supplied package is available. Use the private/offline ZIP, or reconnect and run setup again. Existing files were kept.'
             return
         }
-
+        if (-not $reuseProgram) {
         Expand-Archive -LiteralPath $Zip -DestinationPath (Join-Path $Work 'x') -Force
         $bat = Get-ChildItem -LiteralPath (Join-Path $Work 'x') -Recurse -Filter 'WordLyrics.bat' | Select-Object -First 1
         if (-not $bat -or -not (Test-Path -LiteralPath (Join-Path $bat.Directory.FullName 'wordlyrics\__main__.py'))) {
@@ -273,17 +374,18 @@
             return
         }
         $src = $bat.Directory.FullName
-        $keepNewerProgram = $false
+        }
+        $keepNewerProgram = $reuseProgram
         try {
             $incoming = [regex]::Match([IO.File]::ReadAllText((Join-Path $src 'wordlyrics\__init__.py')), '__version__\s*=\s*"([0-9.]+)"').Groups[1].Value
             $existing = [regex]::Match([IO.File]::ReadAllText((Join-Path $Dest 'wordlyrics\__init__.py')), '__version__\s*=\s*"([0-9.]+)"').Groups[1].Value
-            $keepNewerProgram = $incoming -and $existing -and [version]$existing -gt [version]$incoming
-            if ($keepNewerProgram) { Write-Host " WORDLYRICS_NEWER_INSTALLED: keeping $existing; the supplied program is older ($incoming)." -ForegroundColor Yellow }
+            $keepNewerProgram = $reuseProgram -or ($incoming -and $existing -and [version]$existing -gt [version]$incoming)
+            if ($keepNewerProgram -and -not $reuseProgram) { Write-Host " WORDLYRICS_NEWER_INSTALLED: keeping $existing; the supplied program is older ($incoming)." -ForegroundColor Yellow }
         } catch { }
 
         New-Item -ItemType Directory -Force -Path (Join-Path $Dest 'wordlyrics') | Out-Null
         # the program's own files are replaced by the new ones; models, reports and the portable Python stay
-        foreach ($f in 'WordLyrics.bat', 'requirements.txt', 'README.md', 'LICENSE.txt', 'lyrics-providers.example.json') {
+        foreach ($f in 'WordLyrics.bat', 'requirements.txt', 'README.md', 'install.ps1', 'LICENSE.txt', 'lyrics-providers.example.json') {
             $p = Join-Path $src $f
             if (-not $keepNewerProgram -and (Test-Path -LiteralPath $p)) { Copy-Item -LiteralPath $p -Destination (Join-Path $Dest $f) -Force }
         }
@@ -304,6 +406,8 @@
             Show-Step 'INSTALL NOCTIS PLUGINS'
             foreach ($x in $Extras) {
                 Write-Host (' Installing/updating ' + $x.Name + '...')
+                $hasLocal = ($env:WORDLYRICS_EXTRAS_DIR -and (Test-Path -LiteralPath (Join-Path $env:WORDLYRICS_EXTRAS_DIR ($x.Id + '.zip')) -PathType Leaf)) -or ($x.Id -eq 'dev.moshi.freemusicfinder' -and $env:WORDLYRICS_FINDER_PACKAGE)
+                if (-not $hasLocal -and (Keep-InstalledExtra $x)) { continue }
                 $file = Join-Path $Work ($x.Id + '.zip')
                 $got = $false
                 if ($env:WORDLYRICS_EXTRAS_DIR) {
@@ -324,7 +428,7 @@
                         $got = $true
                     } catch { Write-Host ' LOCAL_FINDER_PACKAGE_INVALID: the supplied plugin ZIP could not be read. Trying its public download.' -ForegroundColor Yellow }
                 }
-                foreach ($u in $(if ($got) { @() } else { $x.Urls })) {
+                foreach ($u in $(if ($got -or $env:WORDLYRICS_OFFLINE_INSTALL -eq '1') { @() } else { $x.Urls })) {
                     try {
                         Invoke-WebRequest -UseBasicParsing -Uri $u -OutFile $file -TimeoutSec 120
                         $got = $true
@@ -345,6 +449,7 @@
         $text = [IO.File]::ReadAllText($batPath)
         $text = $text.Replace("`r`n", "`n").Replace("`n", "`r`n")
         [IO.File]::WriteAllText($batPath, $text, (New-Object Text.UTF8Encoding($false)))
+        if (-not $reuseProgram) { Save-InstalledProgram }
 
         try {
             $desk = [Environment]::GetFolderPath('Desktop')
@@ -392,6 +497,10 @@
         Write-Host ' Add your music folders in Noctis. In WordLyrics, choose [1] Generate missing timestamps.'
     } else { Write-Host ' NEXT: choose [1] Generate missing timestamps, then choose your music folder.' -ForegroundColor Yellow }
     Write-Host ' First use downloads Python, packages and AI models; later starts reuse them.'
+    if ($env:WORDLYRICS_OFFLINE_INSTALL -eq '1') {
+        Write-Host ' OFFLINE_SETUP: program/plugin files were kept or installed locally. Automatic startup downloads are disabled. Start WordLyrics when its Python/packages/models are available.' -ForegroundColor Yellow
+        return
+    }
     if ($installedNoctis -and -not $env:WORDLYRICS_NO_START) { Start-Process -FilePath $noctisExe -WindowStyle Hidden | Out-Null }
     if (-not $env:WORDLYRICS_NO_START) {
         $previousNoPause = $env:WORDLYRICS_NO_PAUSE

@@ -54,6 +54,7 @@ class Song:
     lyrics_url: str = ""           # explicit per-song source chosen by the user, if any
     retime_path: str = ""
     retime_sha256: str = ""
+    superseded: dict = field(default_factory=dict)  # explicitly flagged higher-priority sidecars and their hashes
     previous_tier: int | None = None
     has_lrc: bool = False
     skip: str = ""                 # set when the song is not to be handled at all, with the reason
@@ -321,7 +322,7 @@ def from_file_name(name):
     return (m.group("artist").strip(), m.group("title").strip()) if m else ("", "")
 
 
-def read_song(path, rel, size, *, redo=False, retime_mode="current", lyrics_file=None):
+def read_song(path, rel, size, *, redo=False, retime_mode="current", lyrics_file=None, repair_lyrics=False,ignore_source=False):
     """Everything known about one song without listening to it."""
     from . import audio
     s = Song(path=path, rel=rel, size=size)
@@ -331,8 +332,14 @@ def read_song(path, rel, size, *, redo=False, retime_mode="current", lyrics_file
         readable.read(1)  # surface permissions before tag-reader fallback can hide them
     for ext in WORD_SIDECARS:
         if os.path.exists(base + ext):
-            s.skip = "player uses an existing %s file (protected; word timing not verified)" % ext
-            return s
+            if repair_lyrics:
+                from . import files
+                if os.path.islink(base+ext) or os.stat(base+ext).st_nlink>1:
+                    s.skip="a linked lyric file is protected"
+                    return s
+                s.superseded[ext]=files.sha256(base+ext)
+            else:
+                s.skip = "player uses an existing %s file (protected; word timing not verified)" % ext
     if os.path.exists(base + ".elrc"):
         if not redo:
             s.tier = WORD
@@ -401,9 +408,9 @@ def read_song(path, rel, size, *, redo=False, retime_mode="current", lyrics_file
             return s
         s.text,s.tier=plain_words(raw.decode("utf-8-sig")),PLAIN
         s.lyrics_from="chosen lyric file"
-    if s.tier == WORD:
+    if s.tier == WORD and not s.skip:
         s.skip = "already has word-by-word lyrics"
-    if not s.skip and not lyrics_file and os.path.lexists(base+".lyrics-source.txt"):
+    if not s.skip and not lyrics_file and not ignore_source and os.path.lexists(base+".lyrics-source.txt"):
         from .sources import genius_song_url
         pin=base+".lyrics-source.txt"
         try:

@@ -89,6 +89,20 @@ def with_each_index(make_cmd, what):
     return False
 
 
+def versions_present():
+    """Exact pinned distributions can be checked locally, without contacting any index."""
+    expected={}
+    with open(REQ,encoding="utf-8") as f:
+        for line in f:
+            line=line.strip()
+            if not line or line.startswith("#"):continue
+            pin=line.split()[0]
+            name,version=pin.split("==",1)
+            expected[name]=version
+    code="import importlib.metadata as m\nexpected="+repr(expected)+"\ntry:\n ok=all(m.version(k)==v for k,v in expected.items())\nexcept m.PackageNotFoundError:\n ok=False\nraise SystemExit(0 if ok else 1)"
+    return bool(expected) and works(code).returncode==0
+
+
 def main():
     env_version = sys.argv[1] if len(sys.argv) > 1 else "1"
     t0 = time.time()
@@ -96,9 +110,12 @@ def main():
         say("ENVIRONMENT_REPAIR_REFUSED: setup changes only WordLyrics' private Python.")
         return 1
     write_pth()
+    damaged=works("import "+", ".join(NEEDS)).returncode!=0
+    force=["--force-reinstall"] if os.environ.get("WORDLYRICS_REPAIR_PACKAGES")=="1" or damaged else []
+    reuse=not force and versions_present()
 
     say("Step 2 of 3: the package installer (pip, about 2 MB)")
-    if works("import pip").returncode != 0:
+    if not reuse and works("import pip").returncode != 0:
         getpip = os.path.join(PYDIR, "get-pip.py")
         if not os.path.exists(getpip) and not fetch(links.GET_PIP, getpip):
             say()
@@ -110,9 +127,8 @@ def main():
     say()
 
     say("Step 3 of 3: the packages that read audio and run the models (about 80 MB to download)")
-    damaged=works("import "+", ".join(NEEDS)).returncode!=0
-    force=["--force-reinstall"] if os.environ.get("WORDLYRICS_REPAIR_PACKAGES")=="1" or damaged else []
-    if not with_each_index(lambda u: [PY, "-m", "pip", "install", *force, "--require-hashes", "--only-binary", ":all:", "-r", REQ],
+    if reuse:say("   Exact installed package versions verified locally; package downloads skipped.")
+    elif not with_each_index(lambda u: [PY, "-m", "pip", "install", *force, "--require-hashes", "--only-binary", ":all:", "-r", REQ],
                            "The packages"):
         return 1
     r = works("import %s; import onnxruntime as o; print(o.__version__, 'DmlExecutionProvider' in o.get_available_providers())"

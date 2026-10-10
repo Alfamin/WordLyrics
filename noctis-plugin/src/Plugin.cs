@@ -20,13 +20,14 @@ public sealed class WordLyricsPlugin : INoctisPlugin
     private IPluginHost? _host;
     private Worker? _worker;
     private ProgressWindow? _progress;
+    private readonly List<LyricEditorWindow> _editors = new();
     private ProgressState _lastProgress = new("Waiting for new music");
     private bool _autoShownForJob;
 
     public PluginInfo Info { get; } = new(
         Id: "dev.moshi.wordlyrics",
         Name: "WordLyrics",
-        Version: "1.1.0",
+        Version: "1.2.0",
         Author: "moshi",
         Description: "Word-by-word lyrics for new songs, by themselves: the WordLyrics program finds the lyrics of a song that was added to the library and times every word in the background.");
 
@@ -43,6 +44,14 @@ public sealed class WordLyricsPlugin : INoctisPlugin
             // A 24×24 SVG path: lines of text.
             "M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zM4 12h4v2H4v-2zm10 6H4v-2h10v2zm6 0h-4v-2h4v2zm0-4H10v-2h10v2z",
             (Action<TrackInfo>)OnTrackCommand));
+        _registrations.Add(host.RegisterTrackCommand(
+            "Wrong lyrics / redo with fresh lyrics (WordLyrics)",
+            "M12 2L1 21h22L12 2zm1 16h-2v-2h2v2zm0-4h-2V9h2v5z",
+            (Action<TrackInfo>)OnRepairCommand));
+        _registrations.Add(host.RegisterTrackCommand(
+            "Edit / paste custom lyrics (WordLyrics)",
+            "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z",
+            (Action<TrackInfo>)OnEditCommand));
 
         host.Settings.Changed += OnSettingChanged;
         host.Log("ready");
@@ -55,6 +64,8 @@ public sealed class WordLyricsPlugin : INoctisPlugin
         _registrations.Clear();
         _worker?.Dispose();
         _progress?.Close();
+        foreach (var editor in _editors.ToArray()) editor.Close();
+        _editors.Clear();
         _progress = null;
         _worker = null;
         _host = null;
@@ -87,6 +98,54 @@ public sealed class WordLyricsPlugin : INoctisPlugin
             {
                 Log("could not queue the song: " + ex.Message);
             }
+        });
+    }
+
+    private void OnRepairCommand(TrackInfo track)
+    {
+        if (_host is null) return;
+        var folder = ReadOptions(_host).Folder;
+        var settingsFile = _worker?.SettingsFile;
+        var path = track.FilePath;
+        Task.Run(() =>
+        {
+            try
+            {
+                var tool = new Tool(folder);
+                if (!tool.Installed || tool.TooOld)
+                    Notify("Install or update WordLyrics first, then choose Wrong lyrics / redo again.");
+                else { tool.OpenSongRepair(path,settingsFile:settingsFile); Notify("WordLyrics opened for this song. Choose fresh lyrics, Genius / LRCLIB or custom words, then confirm the backed-up rerun."); }
+            }
+            catch (Exception ex) { Notify("SONG_REPAIR_OPEN_FAILED: " + ex.GetType().Name + ". Use WordLyrics > 8 Search / fix a song."); }
+        });
+    }
+
+    private void OnEditCommand(TrackInfo track)
+    {
+        if (_host is null) return;
+        var host = _host; var path = track.FilePath; var folder = ReadOptions(host).Folder;
+        var settingsFile = _worker?.SettingsFile;
+        Task.Run(() =>
+        {
+            var initial = LyricEditorWindow.ExistingWords(path);
+            OnUi(() =>
+            {
+                if (!ReferenceEquals(_host, host)) return;
+                var window = new LyricEditorWindow(Path.GetFileNameWithoutExtension(path), initial, words =>
+                {
+                    var tool = new Tool(folder);
+                    if (!tool.Installed || tool.TooOld) throw new InvalidOperationException("Install or update WordLyrics first");
+                    var drafts = Path.Combine(host.DataDirectory, "lyric drafts"); Directory.CreateDirectory(drafts);
+                    if ((new DirectoryInfo(drafts).Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("Linked draft folder");
+                    var file = Path.Combine(drafts, Guid.NewGuid().ToString("N") + ".txt");
+                    using (var stream = new FileStream(file, FileMode.CreateNew, FileAccess.Write))
+                    using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false))) writer.Write(words);
+                    tool.OpenSongRepair(path, file, settingsFile);
+                });
+                _editors.Add(window); window.Closed += (_, _) => _editors.Remove(window);
+                var owner = (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.MainWindow;
+                if (owner is null) window.Show(); else window.Show(owner);
+            });
         });
     }
 

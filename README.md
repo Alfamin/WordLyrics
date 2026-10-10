@@ -57,7 +57,7 @@ This replacement has a prominent confirmation; ordinary new-file generation star
 Player-specific `.lyricsfile` and `.ttml` files are reported as protected, with word timing unverified,
 rather than being counted as confirmed word timestamps.
 
-The main menu keeps Generate, Songs, Retry, Folders, Advanced, Connection checks, and Resume/fix jobs.
+The main menu keeps Generate, Songs, Retry, Folders, Advanced, Connection checks, Resume/fix jobs and Search.
 Prominent **WORDLYRICS INPUT** prompts separate app choices from the shell prompt. Advanced holds
 selected-song reruns, source choices, full retiming, speed/offline options, setup and reports.
 Overlapping folders are deduplicated, and each selected folder keeps its own reports and backup history.
@@ -71,7 +71,30 @@ For a rerun, choose current words without old times (useful for delayed lyrics),
 line guides, or fresh lyrics from the providers. Replacements require a byte-verified original backup;
 the accepted candidate and recovery record are saved before replacing the `.elrc`. A rejected result
 keeps the original. A whole-library rerun asks for confirmation twice and can take hours.
-Existing `.ttml` and `.lyricsfile` files remain protected because those formats take priority in players.
+Ordinary generation and timing-only reruns protect `.ttml` and `.lyricsfile` files because those formats
+take priority in players. **Wrong lyrics / redo with fresh lyrics** explicitly handles those files too.
+After accepted word timing is ready, their verified originals become inactive `.bak` files beside the
+song, with a recovery journal and independent backup. Failed publication restores the originals;
+files changed by another writer are never replaced. **Reports → 4 Restore archived incorrect lyric
+files** restores them without overwriting later edits. Audio and embedded tags are never changed.
+
+Choose **8 Search / fix a song**, or type part of a title directly in the main menu. Search covers
+title, artist, album and filename, across selected folders. Results show numbered matches and paths;
+close spelling suggestions are labelled. Select a song, then fresh automatic lookup, keep words and
+retime, choose Genius / LRCLIB / a text file, or edit/paste custom lyrics. The text editor works on a
+private draft; correcting a line does not modify the active lyrics until an approved timing run succeeds.
+Custom and manually chosen LRCLIB words discard provider timestamps and are timed again by the model.
+After you choose or edit the words, timing uses them locally without another online lyric lookup.
+Genius pages still pass the recording/audio gates; automatic runs never wait for a manual source choice.
+
+In Noctis, right-click a song → **Wrong lyrics / redo with fresh lyrics (WordLyrics)** opens this song's
+repair choices. **Edit / paste custom lyrics (WordLyrics)** opens an editable window; current LRC/text
+words load when available. Embedded words can be imported through the terminal editor; TTML/Lyricsfile
+text is not imported into the app editor, so paste the full lyrics if necessary. The timing window shows
+one final backup/replacement confirmation. After success, select another song and return to reload the
+new lyrics in Noctis; its plugin API has no lyric reload hook. An old saved Genius page is ignored for a
+fresh automatic repair. Explicit source/custom choices remain available and unfinished jobs resume
+only their selected songs.
 
 Menu **5 Advanced → 4 Reports → 2** restores previous timing and archives the newer file. Restoration refuses to replace
 a lyric file edited since the rerun or to use a damaged backup. **Undo new additions** handles newly
@@ -91,6 +114,7 @@ From a terminal:
     WordLyrics.bat setup                              fetch the models now instead of at the first run
     WordLyrics.bat providers                          show which lyric sources are enabled
     WordLyrics.bat diagnose                           connection checks and a shareable diagnostic file
+    WordLyrics.bat repair-song "D:\Music\Artist - Song.flac"  repair/edit/source choices for just this song
     WordLyrics.bat source "D:\Music\Artist - Song.flac" "https://genius.com/Artist-song-lyrics"
 
 Other switches: `--speed full|half|light`, `--retry`, `--no-lrc`, `--quick-backup`, `--only TEXT`,
@@ -217,6 +241,20 @@ Keep bundles/configuration with real defaults out of public repositories and pub
 For unattended installs, set `WORDLYRICS_NONINTERACTIVE=1` to skip the optional Noctis question.
 `WORDLYRICS_INSTALL_NOCTIS=1` explicitly requests the tested Noctis installer without prompting.
 
+Repeated setup verifies a local program-file fingerprint record and reuses the current/newer program
+instead of downloading its ZIP. Installed optional plugins check a small version manifest first;
+their ZIPs download only for an update or a missing/damaged installed file. An unavailable update
+check keeps working plugins and reports that the check failed. Plugins installed through this
+installer have dependency-file fingerprints too; manually installed plugins at least check their
+entry DLL. Existing packages are checked locally against pinned versions and usable imports, and
+correct model files are reused. Noctis's setup action reuses a complete local program.
+`WORDLYRICS_REPAIR_INSTALL=1` forces same-version repair downloads. `WORDLYRICS_OFFLINE_INSTALL=1`
+uses installed/supplied program/plugin files without network checks or automatic startup downloads.
+Run the saved `install.ps1` or private bundle locally for offline setup: fetching the public one-line
+installer itself still requires internet. A first model/Python install and online lyric searches need
+network access unless their required files were already supplied. Offline mode cannot recreate files
+that are absent from both the computer and supplied packages.
+
 The plugin does no lyric work itself and never touches a song: it starts WordLyrics on exactly the new
 songs. Everything said on this page about safety holds; of a new song only that song and the lyric files
 next to it are copied to the backup, into a folder named `<music folder> <date> (single songs)`.
@@ -266,7 +304,8 @@ or bleep markers are skipped for explicit or unlabelled recordings. Known clean 
 version. Explicit advisory tags are read when available; they are never written. Missing words are
 never guessed. Censorship without visible markers or reliable version metadata can still escape detection.
 Normal runs skip existing word-timed files. Explicit, confirmed reruns may replace `.elrc` files
-after the backup, audio-match and timing checks; other existing lyric formats remain protected.
+after the backup, audio-match and timing checks. The explicitly selected wrong-lyrics repair can
+archive higher-priority formats after accepted timing; ordinary runs keep those files protected.
 
 Genius uses public search and lyric pages and needs no key for that route. Its artist/section headings
 are removed, and the remaining words are aligned to your audio. This helps with underground and

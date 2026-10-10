@@ -26,7 +26,7 @@ internal sealed class Tool
     public bool Installed => File.Exists(Bat);
 
     /// <summary>The first WordLyrics that can be given single songs and reports what it did with them.</summary>
-    private static readonly Version Needed = new(1, 5, 0);
+    private static readonly Version Needed = new(1, 6, 0);
 
     /// <summary>Installed, but from before it could be handed single songs.</summary>
     public bool TooOld
@@ -119,14 +119,23 @@ internal sealed class Tool
     }
 
     public void OpenResume(string runFolder)
+        => OpenRequest(new[] { "resume", runFolder });
+
+    public void OpenSongRepair(string path, string? draft = null, string? settingsFile = null)
+        => OpenRequest(draft is null ? new[] { "repair-song", path } : new[] { "repair-song", path, "--lyrics-file", draft }, settingsFile);
+
+    internal ProcessStartInfo RequestInfo(string[] request, string? settingsFile = null)
     {
         var info = new ProcessStartInfo(Cmd)
         {
             Arguments = $"/d /s /c \"\"{Bat}\" launch\"", UseShellExecute = false, CreateNoWindow = false, WorkingDirectory = Folder,
         };
-        info.Environment["WORDLYRICS_LAUNCH_REQUEST"] = System.Text.Json.JsonSerializer.Serialize(new[] { "resume", runFolder });
-        Process.Start(info)?.Dispose();
+        info.Environment["WORDLYRICS_LAUNCH_REQUEST"] = System.Text.Json.JsonSerializer.Serialize(request);
+        if (settingsFile is not null) info.Environment["WORDLYRICS_NOCTIS_SETTINGS"] = settingsFile;
+        return info;
     }
+
+    private void OpenRequest(string[] request, string? settingsFile = null) => Process.Start(RequestInfo(request,settingsFile))?.Dispose();
 
     /// <summary>Opens WordLyrics in its own window on a whole folder; it asks its questions there.</summary>
     public void OpenOnFolder(string root)
@@ -150,7 +159,7 @@ internal sealed class Tool
     {
         Directory.CreateDirectory(scriptFolder);
         var script = Path.Combine(scriptFolder, "setup.cmd");
-        File.WriteAllText(script, SetupScript.Replace("\r\n", "\n").Replace("\n", "\r\n"), new UTF8Encoding(false));
+        File.WriteAllText(script, SetupText().Replace("\r\n", "\n").Replace("\n", "\r\n"), new UTF8Encoding(false));
         var info = new ProcessStartInfo(Cmd)
         {
             Arguments = $"/d /s /c \"\"{script}\"\"",
@@ -165,6 +174,15 @@ internal sealed class Tool
     }
 
     private static string Cmd => Path.Combine(Environment.SystemDirectory, "cmd.exe");
+
+    internal string SetupText()
+    {
+        var complete = Installed && !TooOld && new[] { "__main__.py", "runner.py", "firststart.py", "menu.py", "library.py", "repair.py", "drafts.py", "search.py" }
+            .All(name => File.Exists(Path.Combine(Folder, "wordlyrics", name))) && File.Exists(Path.Combine(Folder,"requirements.txt"));
+        return complete ? SetupScript.Replace(DownloadInstaller, "echo  Reusing the installed WordLyrics program. Existing Python/packages/models are checked before any download.") : SetupScript;
+    }
+
+    private const string DownloadInstaller = "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -Command \"irm https://raw.githubusercontent.com/Alfamin/WordLyrics/main/install.ps1 | iex\"";
 
     /// <summary>A folder as a quoted argument: "D:\" would end in an escaped quote, "D:\." does not.</summary>
     private static string FolderArgument(string folder)

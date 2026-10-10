@@ -9,7 +9,7 @@ import urllib.parse
 import uuid
 import webbrowser
 
-from . import __version__,backup,files,folders,library as L,rerun,resume
+from . import __version__,backup,files,folders,library as L,rerun,resume,search
 from .pipeline import library_home
 from .sources import genius_song_url
 from .ui import duration, _enable_ansi
@@ -68,6 +68,7 @@ class Menu:
         self.origin={}
         self.folder_notes=[]
         self.scan_unreadable={}
+        self.last_job_code=0
         self.color=writer is None and _enable_ansi() and not os.environ.get("NO_COLOR")
         try:
             data=json.loads(self.preferences.read_text(encoding="utf-8"))
@@ -254,11 +255,118 @@ class Menu:
             elif pick=="2":page=min(page+1,(len(shown)-1)//25)
             elif pick=="3":page=max(0,page-1)
             elif pick=="4":
-                term=self.ask("Name contains (empty resets): ",numbers=False).casefold()
-                shown=[s for s in songs if term in s.rel.casefold()] if term else list(songs)
+                term=self.ask("Song, artist, album or filename (partial names work; empty resets): ",numbers=False)
+                shown,approximate=search.find(songs,term)
+                if approximate:self.say("No direct matches. Closest spelling matches are shown; check the artist before selecting.")
                 if not shown:self.say("No matches.");shown=list(songs)
                 page=0
             elif pick=="5":return shown
+
+    def search_songs(self,songs=None,query=None):
+        songs=self.scan() if songs is None else list(songs)
+        if not songs:self.say("No songs available to search.");return []
+        while True:
+            query=query if query is not None else self.ask("Type part of a song name or artist (0 back): ",numbers=False)
+            if not query or query=="0":return []
+            found,approximate=search.find(songs,query);page=0
+            if not found:self.say("No matches for "+query+". Try another part of the title or artist.");query=None;continue
+            while True:
+                self.panel("SEARCH RESULTS: "+query,"Closest spelling matches - check the artist." if approximate else "%d matching songs" % len(found))
+                for i,s in enumerate(found[page*25:page*25+25],page*25+1):
+                    self.say("  [%d] %s%s  [%s]\n      %s" % (i,(s.artist+" - ") if s.artist else "",s.title or s.name,self.status(s),s.path))
+                self.say("\n  Type song numbers (such as 1 or 1,3). N Next page | P Previous | S New search | 0 Back")
+                raw=self.ask("Song number(s), N/P/S, or another search: ",numbers=False)
+                action=raw.casefold()
+                if action=="0":return []
+                if action=="n":page=min(page+1,(len(found)-1)//25);continue
+                if action=="p":page=max(page-1,0);continue
+                if action=="s":query=None;break
+                try:
+                    indices=selection(raw,len(found))
+                    if indices:return [found[i] for i in indices]
+                except ValueError:
+                    if any(c.isalpha() for c in raw):query=raw;break
+                    self.say("Choose a number shown in this result list.")
+
+    def song_actions(self,songs):
+        if not songs:return
+        self.panel("SELECTED SONGS", "\n".join("  "+((s.artist+" - ") if s.artist else "")+(s.title or s.name) for s in songs))
+        self.say("\n  [1] WRONG LYRICS / REDO WITH FRESH LYRICS\n  [2] Keep the words; redo their timing\n  [3] Choose Genius, LRCLIB or a lyric file (one song)\n  [4] Show file / lyric details\n  [5] EDIT OR PASTE CUSTOM LYRICS (one song)\n  [0] Back")
+        action=self.ask("> ")
+        if action=="1":self.job(songs,redo=True,mode_hint="fresh",repair_lyrics=True)
+        elif action=="2":self.job(songs,redo=True,mode_hint="current")
+        elif action=="3":
+            if len(songs)!=1:self.say("Select one song to choose its source.")
+            else:self.source_choice(selected_song=songs[0])
+        elif action=="4":
+            for s in songs:self.say("%s\n  Artist: %s | Title: %s\n  Lyrics: %s" % (s.path,s.artist or "unknown",s.title or s.name,self.status(s)))
+        elif action=="5":
+            if len(songs)!=1:self.say("Select one song to edit its lyrics.")
+            else:self.custom_lyrics(songs[0])
+
+    def custom_lyrics(self,song):
+        from . import drafts
+        self.panel("EDIT / PASTE LYRICS", "Work on a private draft. The song and existing lyrics are unchanged until timing succeeds.")
+        self.say("  [1] Open current words in a text editor\n  [2] Paste the full lyrics here\n  [3] Use an existing lyric text file\n  [0] Back")
+        action=self.ask("> ")
+        if action=="1":
+            path=drafts.create(str(self.home),song)
+            self.say("Draft: "+path+"\nEdit or replace its words, then SAVE the file. If it is blank, paste the full lyrics.")
+            try:drafts.open_editor(path)
+            except OSError as e:self.say(str(e))
+            if self.ask("1 Use the saved draft and review timing   0 Keep draft for later: ")!="1":return
+        elif action=="2":
+            self.say("Paste complete lyrics, then enter .done on a line by itself. .cancel cancels. Nothing is echoed in reports.")
+            lines=[];length=0
+            while True:
+                try:line=self.read("  Lyrics > ")
+                except (EOFError,KeyboardInterrupt):return
+                if line.strip()==".cancel":return
+                if line.strip()==".done":break
+                length+=len(line)
+                if length>500_000:self.say("Lyrics are too large; use a normal song text file.");return
+                lines.append(line)
+            path=drafts.create(str(self.home),song,"\n".join(lines))
+        elif action=="3":
+            path=self.ask("Lyric text file (0 back): ",numbers=False).strip('"')
+            if path=="0":return
+        else:return
+        if not os.path.isfile(path) or os.path.islink(path):self.say("Choose an existing, unlinked text file.");return
+        if not L._read_text(path).strip():self.say("The draft is empty. Paste the full lyrics, save it, then choose it as a lyric text file.");return
+        self.job([song],redo=True,lyrics_file=os.path.abspath(path),mode_hint="current",repair_lyrics=True,automatic=False)
+
+    def lrclib_choice(self,song):
+        from . import drafts
+        query=self.ask("LRCLIB song / artist search (Enter uses this song; 0 back): ",numbers=False)
+        if query=="0":return
+        query=query or ((song.artist+" "+(song.title or song.name)).strip())
+        self.panel("SEARCHING LRCLIB", "Provider timestamps will be discarded; WordLyrics will time the selected words itself.")
+        rows=drafts.lrclib_results(str(self.home),song,query)
+        if not rows:self.say("No usable uncensored lyric results. Try Genius or custom lyrics.");return
+        for i,row in enumerate(rows,1):
+            self.say("  [%d] %s - %s | %s | %ss%s" % (i,row.get("artistName",""),row.get("trackName",""),row.get("albumName",""),row.get("duration","?"),(" | CHECK: "+row["warning"]) if row["warning"] else ""))
+        chosen=selection(self.ask("One result number (0 back): "),len(rows))
+        if len(chosen)!=1:return
+        row=rows[chosen[0]]
+        path=drafts.create(str(self.home),song,row["chosen_text"],label="LRCLIB")
+        self.say("Selected LRCLIB words saved as a private draft: "+path)
+        self.job([song],redo=True,lyrics_file=path,mode_hint="current",repair_lyrics=True,automatic=False)
+
+    def repair_path(self,path,lyrics_file=None):
+        path=os.path.abspath(path)
+        if not os.path.isfile(path) or os.path.islink(path) or Path(path).suffix.lower() not in L.AUDIO_EXT:
+            self.panel("SONG UNAVAILABLE", "Choose an existing audio file, rather than a folder or link.");return 2
+        known=self.selected_roots+folders.discover()[0]
+        matching=[root for root in known if backup.inside(path,root)]
+        root=max(matching,key=len) if matching else os.path.dirname(path)
+        self.selected_roots=[root];self.state["library"]=root;self.origin[path]=root
+        try:
+            song=L.read_song(path,os.path.relpath(path,root),os.path.getsize(path),redo=True,repair_lyrics=True,ignore_source=True)
+            self.panel("WRONG LYRICS / REPAIR THIS SONG", ((song.artist+" - ") if song.artist else "")+(song.title or song.name)+"\n"+path)
+            if lyrics_file:self.job([song],redo=True,lyrics_file=lyrics_file,mode_hint="current",repair_lyrics=True,automatic=False)
+            else:self.song_actions([song])
+            return self.last_job_code
+        except (OSError,ValueError) as e:self.panel("SONG NEEDS ATTENTION",str(e));return 1
 
     def history(self):
         result={}
@@ -275,9 +383,12 @@ class Menu:
     def prior(self,history,song):
         return history.get(song.path,history.get(song.rel,{})).get("status")
 
-    def job(self,songs,redo=False,whole=False,lyrics_file=None,mode_hint=None):
-        if lyrics_file:
-            songs=[L.read_song(s.path,s.rel,s.size,redo=True,lyrics_file=lyrics_file) for s in songs]
+    def job(self,songs,redo=False,whole=False,lyrics_file=None,mode_hint=None,repair_lyrics=False,automatic=True):
+        self.last_job_code=0
+        if lyrics_file or repair_lyrics:
+            songs=[L.read_song(s.path,s.rel,os.path.getsize(s.path),redo=True,lyrics_file=lyrics_file,
+                               retime_mode="fresh" if repair_lyrics else "current",repair_lyrics=repair_lyrics,
+                               ignore_source=repair_lyrics and automatic) for s in songs]
         songs=[s for s in songs if not s.skip]
         if not songs:self.panel("NOTHING TO START", "No eligible songs selected. Use Songs to see skip reasons, or Advanced > Rerun to replace protected .elrc timing.");return
         repair_paths=set()
@@ -302,6 +413,9 @@ class Menu:
         self.panel("READY TO %s" % ("RERUN" if redo else "GENERATE TIMESTAMPS"), "Selected: %d songs; %s of audio. Speed: %s." % (len(songs),duration(sum(s.seconds for s in songs)),self.state["speed"]))
         self.say("Only these songs and their sidecars are backed up. Audio/tags are never changed.")
         if redo:self.say("Existing .elrc timing will be replaced only after a verified backup and successful checks. Failed results keep the original.")
+        if repair_lyrics:
+            self.say(("Your chosen words will be timed again; old/provider timestamps are discarded. No extra lyric lookup is needed." if lyrics_file else "Fresh online lyrics will be checked against the recording. Old words are ignored.")+" Preferred .ttml/.lyricsfile files will be archived only when accepted word timing is ready; Restore can bring them back.")
+            if automatic:self.say("The old saved Genius choice is ignored for this repair.")
         if redo:
             self.say("\n  [1] START RERUN\n  [0] CANCEL - leave everything as it is\n")
             if self.ask("> ")!="1":return
@@ -327,11 +441,14 @@ class Menu:
             result=chosen.with_suffix(".result.json")
             args += ["--result",str(result)]
             if self.state["backup"]:args += ["--backup-to",self.state["backup"]]
-            if self.state["offline"]:args.append("--offline")
+            if lyrics_file or (self.state["offline"] and not repair_lyrics):args.append("--offline")
             if redo or repair:args += ["--redo","--retime-mode",mode,"--confirm-redo"]
             else:args.append("--retry")
             if lyrics_file:args += ["--lyrics-file",lyrics_file]
+            if repair_lyrics:args.append("--repair-lyrics")
+            if repair_lyrics and automatic:args.append("--ignore-lyric-source")
             code=self.execute(args)
+            self.last_job_code=code or self.last_job_code
             try:
                 data=json.loads(result.read_text(encoding="utf-8"))
                 summary=data["summary"]
@@ -343,6 +460,7 @@ class Menu:
                     self.say("Your progress is saved. Choose 7 Resume / fix unfinished jobs to fix a problem and retry only affected songs.")
                 report_path=Path(data.get("run_folder", ""))/"report.html"
                 self.say("Report: "+str(report_path))
+                if repair_lyrics and summary["timed"]:self.say("In Noctis, select another song and return to this song to reload its new lyrics.")
             except (OSError,ValueError,KeyError,TypeError):
                 self.panel("RESULT", "The run returned status %s. No result summary was available; read the messages above. Success has not been confirmed." % code)
                 if code:total_attention += len(paths)
@@ -369,28 +487,31 @@ class Menu:
         else:return
         self.job(songs,redo=True)
 
-    def source_choice(self,eligible=None):
+    def source_choice(self,eligible=None,selected_song=None):
         history=self.history()
-        all_songs=self.scan() if eligible is None else eligible
+        all_songs=[selected_song] if selected_song is not None else self.scan() if eligible is None else eligible
         failed=[s for s in all_songs if self.prior(history,s) in FAILURES or
                 (s.previous_tier if s.previous_tier is not None else s.tier) in (L.NONE,L.PLAIN)]
-        self.say("1 Missing/failed songs   2 Any song   0 Back")
-        pick=self.ask("> ")
-        if pick not in ("1","2"):return
-        chosen=self.choose(failed if pick=="1" else all_songs)
+        if selected_song is not None:chosen=[selected_song]
+        else:
+            self.say("1 Missing/failed songs   2 Any song   0 Back")
+            pick=self.ask("> ")
+            if pick not in ("1","2"):return
+            chosen=self.choose(failed if pick=="1" else all_songs)
         if len(chosen)!=1:self.say("Choose one song for a lyric source.");return
         s=chosen[0]
         if eligible is not None:
             s=L.read_song(s.path,s.rel,os.path.getsize(s.path),redo=True,retime_mode="guided")
-        self.say("1 Paste a Genius page   2 Choose a lyric text file   3 Open Genius search   4 Use automatic search again   0 Back")
+        self.say("1 Paste a Genius page   2 Choose a lyric text file   3 Open Genius search   4 Use automatic search again   5 Search LRCLIB / choose a result   0 Back")
         action=self.ask("> ")
+        if action=="5":self.lrclib_choice(s);return
         if action=="3":
             webbrowser.open("https://genius.com/search?"+urllib.parse.urlencode({"q":s.artist+" "+s.title}));return
         if action=="2":
             path=self.ask("Lyric text file (0 back): ",numbers=False).strip('"')
             if path=="0":return
             if not os.path.isfile(path) or os.path.islink(path):self.say("Choose an existing text file.");return
-            self.job([s],redo=True,lyrics_file=os.path.abspath(path),mode_hint="current");return
+            self.job([s],redo=True,lyrics_file=os.path.abspath(path),mode_hint="current",repair_lyrics=selected_song is not None,automatic=False);return
         if action not in ("1","4"):return
         url="auto" if action=="4" else genius_song_url(self.ask("Genius song URL (0 back): ",numbers=False))
         if not url:self.say("That is not a public Genius song page.");return
@@ -410,12 +531,12 @@ class Menu:
         except OSError as e:self.say(str(e));return
         if self.ask("1 Rerun this song now   0 Back: ")=="1":
             fresh=L.read_song(s.path,s.rel,s.size,redo=True,retime_mode="guided")
-            self.job([fresh],redo=True,mode_hint="fresh")
+            self.job([fresh],redo=True,mode_hint="fresh",repair_lyrics=selected_song is not None,automatic=False)
 
     def reports(self):
         root=self.root()
         if root is None:return
-        self.say("1 Open a report   2 Restore previous timing   3 Undo new additions   0 Back")
+        self.say("1 Open a report   2 Restore previous timing   3 Undo new additions   4 Restore archived incorrect lyric files   0 Back")
         pick=self.ask("> ")
         if pick=="1":
             paths=sorted(Path(library_home(str(self.home),root)).glob("run */report.html"),reverse=True)
@@ -434,6 +555,16 @@ class Menu:
                         try:rerun.restore(str(self.home),root,rows[i]);self.say("Restored: "+rows[i]["rel"])
                         except OSError as e:self.say(str(e))
             except ValueError as e:self.say(str(e))
+            self.catalog=None
+        elif pick=="4":
+            from . import repair
+            rows=repair.records(str(self.home),root)
+            for i,row in enumerate(rows,1):self.say("%d  %s" % (i,row["rel"]))
+            if not rows:self.say("No archived preferred lyric files to restore.");return
+            chosen=selection(self.ask("File numbers to restore (0 back): "),len(rows))
+            if chosen and self.ask("Restore these old lyrics? 1 Yes   0 Cancel: ")=="1":
+                for i in chosen:
+                    repair.restore(root,rows[i]);self.say("Restored: "+rows[i]["rel"])
             self.catalog=None
         elif pick=="3":
             self.say("This archives unmodified additions made by WordLyrics. Retimed originals use Restore previous timing.")
@@ -529,8 +660,10 @@ class Menu:
             if not self.selected_roots:self.say("  Music folders will be detected from Noctis when you start.")
             for note in self.folder_notes:self.say("  "+note)
             self.folder_notes=[]
-            self.say("\n  [1] GENERATE MISSING TIMESTAMPS\n  [2] Songs & lyric status\n  [3] Retry songs that need attention\n  [4] Choose music folders\n  [5] Advanced / reports / restore\n  [6] Check connections & setup\n  [7] Resume / fix unfinished jobs\n  [0] Exit\n")
-            pick=self.ask("> ")
+            self.say("\n  [1] GENERATE MISSING TIMESTAMPS\n  [2] Songs & lyric status\n  [3] Retry songs that need attention\n  [4] Choose music folders\n  [5] Advanced / reports / restore\n  [6] Check connections & setup\n  [7] Resume / fix unfinished jobs\n  [8] SEARCH / FIX A SONG\n  [0] Exit\n")
+            self.say("  You can also type part of a song name here to search directly.")
+            raw=self.ask("> ",numbers=False)
+            pick=raw.translate(DIGITS) if raw.translate(DIGITS).isdecimal() else raw
             if pick=="0":return 0
             try:
                 if pick=="1":
@@ -548,7 +681,7 @@ class Menu:
                     tiers={"2":{L.NONE,L.INSTRUMENTAL},"3":{L.PLAIN,L.LINE},"4":{L.WORD}}
                     shown=[s for s in songs if choice=="1" or (s.previous_tier if s.previous_tier is not None else s.tier) in tiers.get(choice,set())]
                     selected=self.choose(shown)
-                    if selected:self.job(selected,redo=True)
+                    if selected:self.song_actions(selected)
                 elif pick=="3":
                     history=self.history()
                     songs=[s for s in self.scan() if self.prior(history,s) in FAILURES or
@@ -559,6 +692,8 @@ class Menu:
                 elif pick=="5":self.advanced()
                 elif pick=="6":self.execute(["diagnose"])
                 elif pick=="7":self.unfinished()
+                elif pick=="8":self.song_actions(self.search_songs())
+                elif any(c.isalpha() for c in pick):self.song_actions(self.search_songs(query=pick))
             except (OSError,ValueError) as e:
                 self.say("Nothing unsafe was forced: "+str(e))
 

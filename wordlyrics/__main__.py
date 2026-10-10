@@ -95,6 +95,8 @@ def parser():
     ap.add_argument("--retime-mode",choices=["current","guided","fresh"],default="current")
     ap.add_argument("--confirm-redo",action="store_true",help="confirmation supplied by the interactive menu for a library rerun")
     ap.add_argument("--lyrics-file",help="use this plain lyric file for exactly one selected song")
+    ap.add_argument("--repair-lyrics",action="store_true",help="explicitly replace flagged higher-priority lyric sidecars after accepted fresh timing; selected songs only")
+    ap.add_argument("--ignore-lyric-source",action="store_true",help="ignore an old saved source choice during a fresh automatic repair")
     ap.add_argument("--only", action="append", default=[], metavar="TEXT", help="only songs whose path contains this text (may be repeated)")
     ap.add_argument("--limit", type=int, default=0, metavar="N", help="only the first N songs (for a trial)")
     ap.add_argument("--no-open", action="store_true", help="do not open the report when done")
@@ -287,9 +289,14 @@ def _main(argv=None):
     if argv[:1]==["launch"]:
         import json
         requested=json.loads(os.environ.get("WORDLYRICS_LAUNCH_REQUEST","[]"))
-        if not isinstance(requested,list) or not requested or requested[0] not in ("menu","resume","diagnose") or not all(isinstance(arg,str) for arg in requested):
+        if not isinstance(requested,list) or not requested or requested[0] not in ("menu","resume","diagnose","repair-song") or not all(isinstance(arg,str) for arg in requested):
             print("INVALID_LAUNCH_REQUEST: open WordLyrics from its shortcut.");return 2
         return _main(requested)
+    if argv[:1]==["repair-song"]:
+        if len(argv)!=2 and not (len(argv)==4 and argv[2]=="--lyrics-file"):
+            print("Choose one song from Noctis or WordLyrics > Search / fix a song.");return 2
+        from .menu import Menu
+        return Menu(HOME,[],main).repair_path(argv[1],lyrics_file=argv[3] if len(argv)==4 else None)
     if argv[:1]==["resume"]:
         if len(argv)!=2:
             print("Choose a saved job in WordLyrics > Resume / fix unfinished jobs.");return 2
@@ -385,6 +392,8 @@ def _main(argv=None):
             return 2
         opts.quick_backup=False
         opts.retry=True
+    if opts.repair_lyrics and (not opts.redo or opts.songs is None or (opts.retime_mode!="fresh" and not opts.lyrics_file)):
+        print("Wrong-lyrics repair needs selected songs and fresh lyrics (or a chosen text file). Nothing was done.");return 2
     if opts.dry_run:
         return dry_run(source, opts)
     if already_running():

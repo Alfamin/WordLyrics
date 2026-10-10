@@ -155,6 +155,15 @@ class Run:
                 self.log.flush()
 
     def put_file(self, song, ext, text, kind):
+        if ext==".elrc" and getattr(self.opts,"repair_lyrics",False):
+            from .repair import Publication
+            with Publication(self,song,file_bytes(text)) as transaction:
+                result=self._put_file(song,ext,text,kind,transaction=transaction)
+                if result:transaction.commit()
+                return result
+        return self._put_file(song,ext,text,kind)
+
+    def _put_file(self, song, ext, text, kind,transaction=None):
         """Publish accepted lyrics; explicit retiming requires a verified original backup."""
         path = song.base + ext
         data = file_bytes(text)
@@ -181,6 +190,9 @@ class Run:
             safe_files.replace_backed_up(path,data,saved,song.retime_sha256)
         elif not safe_files.create_new(path,data):
             return False
+        if transaction is not None:
+            state=os.lstat(path)
+            transaction.output_identity=(state.st_dev,state.st_ino)
         with open(path, "rb") as fh:
             if fh.read() != data:
                 raise OSError("the lyrics file did not read back as written: " + os.path.basename(path))
@@ -281,7 +293,9 @@ class Run:
             try:
                 out[i] = L.read_song(path, rel, sz, redo=getattr(self.opts,"redo",False),
                                      retime_mode=getattr(self.opts,"retime_mode","current"),
-                                     lyrics_file=getattr(self.opts,"lyrics_file",None))
+                                     lyrics_file=getattr(self.opts,"lyrics_file",None),
+                                     repair_lyrics=getattr(self.opts,"repair_lyrics",False),
+                                     ignore_source=getattr(self.opts,"ignore_lyric_source",False))
             except Exception as e:
                 s = L.Song(path=path, rel=rel, size=sz)
                 from .recovery import permission_error
@@ -575,7 +589,7 @@ class Run:
         except OSError as e:                                   # the lyrics file could not be created
             if self.stop.is_set():
                 return
-            why = e.strerror or type(e).__name__
+            why = e.strerror or str(e)[:200] or type(e).__name__
             from .recovery import permission_error
             if permission_error(e):
                 why="PERMISSION_DENIED: "+why
@@ -656,6 +670,10 @@ class Run:
         now = {rel: (sz, mt) for _, rel, sz, mt in files}
         mine = {os.path.normcase(w["rel"]) for w in self.written}
         missing = sorted(r for r in before if r not in now)
+        archived=getattr(self,"lyric_archives",[])
+        archived_originals={row["rel"] for row in archived if os.path.isfile(os.path.join(self.source,row["inactive_rel"])) and safe_files.sha256(os.path.join(self.source,row["inactive_rel"]))==row["sha256"]}
+        missing=[r for r in missing if r not in archived_originals]
+        mine.update(os.path.normcase(row["inactive_rel"]) for row in archived if row["rel"] in archived_originals)
         changed = sorted(r for r in before if r in now and tuple(before[r]) != now[r])
         replaced=[]
         for w in self.written:
@@ -663,12 +681,15 @@ class Run:
                 if safe_files.sha256(os.path.join(self.source,w["rel"]))==w["sha256"]:
                     replaced.append(w["rel"])
         changed=[r for r in changed if r not in replaced]
+        rolled_back=getattr(self,"lyric_rollbacks",{})
+        changed=[r for r in changed if r not in rolled_back or safe_files.sha256(os.path.join(self.source,r))!=rolled_back[r]]
         new = sorted(r for r in now if r not in before)
         foreign = [r for r in new if os.path.normcase(r) not in mine]
         lost = sorted(w["rel"] for w in self.written if w["rel"] not in now)
         self.check = {"files_before": len(before), "files_now": len(now), "missing": missing, "changed": changed,
                       "new_by_this_run": len(new) - len(foreign), "new_not_by_this_run": foreign, "written_but_gone": lost,
                       "retimed":replaced,"clean": not missing and not changed and not foreign and not lost}
+        self.check["archived_incorrect_lyrics"]=sorted(archived_originals)
         if self.check["clean"]:
             stage.finish("original audio preserved; %d lyric files written, %d explicitly retimed" % (len(self.written),len(replaced)))
         else:

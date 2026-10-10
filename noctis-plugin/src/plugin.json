@@ -1,7 +1,7 @@
 {
   "id": "dev.moshi.wordlyrics",
   "name": "WordLyrics",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "moshi",
   "description": "Word-by-word lyrics for new songs, by themselves: when a song is added to a library folder (downloaded, copied, ripped), the WordLyrics program finds its lyrics and times every word in the background, and writes a .elrc file next to the song. Songs are only read. Needs the WordLyrics program on this computer; the switch below installs it.",
   "type": "dotnet",
@@ -52,7 +52,7 @@
       "label": "Install or update WordLyrics",
       "type": "bool",
       "default": false,
-      "description": "Flip this switch (either way). A window opens that downloads the program and its models (about 1.4 GB the first time) into the folder above and shows its progress. Nothing else on the computer is changed."
+      "description": "Flip this switch (either way). A window checks the installed program, packages and models first; working components are reused. Missing parts download into the folder above (about 1.4 GB for a first setup). For a published update, run the public installer again."
     },
     {
       "key": "showProgress",

@@ -6,7 +6,7 @@ import uuid
 
 from . import backup, files, library as L
 
-FLAGS={"offline":"--offline","no_lrc":"--no-lrc","quick_backup":"--quick-backup","redo":"--redo"}
+FLAGS={"offline":"--offline","no_lrc":"--no-lrc","quick_backup":"--quick-backup","redo":"--redo","repair_lyrics":"--repair-lyrics","ignore_lyric_source":"--ignore-lyric-source"}
 
 
 def save(run, paths=None):
@@ -91,6 +91,7 @@ def pending(home,run_dir):
             result.append({"path":path,"reason":"PERMISSION_DENIED: this file cannot be read by the current Windows user.","status":"failed"});continue
         current=Path(path).with_suffix(".elrc")
         verified=current.is_file() and not current.is_symlink() and L.classify(L._read_text(str(current)))==L.WORD
+        if data["options"].get("repair_lyrics") and any(os.path.lexists(str(current.with_suffix(ext))) for ext in L.WORD_SIDECARS):verified=False
         initial=data.get("initial_elrc_hashes",{}).get(path)
         if verified and initial and files.sha256(current)!=initial:done.add(path)
         if verified and (path in done or row.get("status")=="timed" or not data["options"].get("redo")):
@@ -114,7 +115,9 @@ def submit(home,run_dir,execute,*,fresh=False,backup_to=None):
     args=[data["source"],"--yes","--retry","--no-open","--result",str(result),"--speed",options.get("speed","full")]
     if not data.get("needs_scan"):args += ["--songs-from",str(selected)]
     for key,flag in FLAGS.items():
+        if fresh and key=="offline":continue  # choosing fresh lookup explicitly replaces the prior local-only lyric input
         if options.get(key):args.append(flag)
+    if fresh and options.get("repair_lyrics") and "--ignore-lyric-source" not in args:args.append("--ignore-lyric-source")
     place=backup_to if backup_to is not None else options.get("backup_to")
     if place:args += ["--backup-to",place]
     if options.get("redo"):args += ["--confirm-redo","--retime-mode","fresh" if fresh else options.get("retime_mode","current")]
