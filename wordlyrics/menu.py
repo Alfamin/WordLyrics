@@ -389,6 +389,8 @@ class Menu:
             songs=[L.read_song(s.path,s.rel,os.path.getsize(s.path),redo=True,lyrics_file=lyrics_file,
                                retime_mode="fresh" if repair_lyrics else "current",repair_lyrics=repair_lyrics,
                                ignore_source=repair_lyrics and automatic) for s in songs]
+        for song in songs:
+            if song.skip:self.say("%s: %s" % (song.rel,song.skip))
         songs=[s for s in songs if not s.skip]
         if not songs:self.panel("NOTHING TO START", "No eligible songs selected. Use Songs to see skip reasons, or Advanced > Rerun to replace protected .elrc timing.");return
         repair_paths=set()
@@ -406,15 +408,15 @@ class Menu:
         if redo and mode_hint is not None:
             mode=mode_hint
         elif redo:
-            self.say("1 Keep current words, discard old times\n2 Keep current words and line guides\n3 Fetch fresh lyrics\n0 Cancel")
+            self.say("1 Keep current words and valid line guides (recommended)\n2 Keep words, locate everything from scratch (advanced)\n3 Fetch fresh lyrics\n0 Cancel")
             pick=self.ask("> ")
             if pick not in ("1","2","3"):return
-            mode={"1":"current","2":"guided","3":"fresh"}[pick]
+            mode={"1":"current","2":"unanchored","3":"fresh"}[pick]
         self.panel("READY TO %s" % ("RERUN" if redo else "GENERATE TIMESTAMPS"), "Selected: %d songs; %s of audio. Speed: %s." % (len(songs),duration(sum(s.seconds for s in songs)),self.state["speed"]))
         self.say("Only these songs and their sidecars are backed up. Audio/tags are never changed.")
         if redo:self.say("Existing .elrc timing will be replaced only after a verified backup and successful checks. Failed results keep the original.")
         if repair_lyrics:
-            self.say(("Your chosen words will be timed again; old/provider timestamps are discarded. No extra lyric lookup is needed." if lyrics_file else "Fresh online lyrics will be checked against the recording. Old words are ignored.")+" Preferred .ttml/.lyricsfile files will be archived only when accepted word timing is ready; Restore can bring them back.")
+            self.say(("Your chosen words will be timed again. Valid line timestamps are rough guides; old word timestamps are recalculated. No extra lyric lookup is needed." if lyrics_file else "Fresh online lyrics will be checked against the recording. Old words are ignored.")+" Preferred .ttml/.lyricsfile files will be archived only when accepted word timing is ready; Restore can bring them back.")
             if automatic:self.say("The old saved Genius choice is ignored for this repair.")
         if redo:
             self.say("\n  [1] START RERUN\n  [0] CANCEL - leave everything as it is\n")

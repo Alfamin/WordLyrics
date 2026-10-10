@@ -27,7 +27,7 @@ public sealed class WordLyricsPlugin : INoctisPlugin
     public PluginInfo Info { get; } = new(
         Id: "dev.moshi.wordlyrics",
         Name: "WordLyrics",
-        Version: "1.2.0",
+        Version: "1.2.1",
         Author: "moshi",
         Description: "Word-by-word lyrics for new songs, by themselves: the WordLyrics program finds the lyrics of a song that was added to the library and times every word in the background.");
 

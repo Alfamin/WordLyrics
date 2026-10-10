@@ -47,14 +47,14 @@ class SearchAndEdit(unittest.TestCase):
             m.read=Mock(side_effect=EOFError)
             self.assertEqual(m.search_songs(self.songs()),[])
 
-    def test_draft_strips_timestamps_and_keeps_unicode_without_touching_original(self):
+    def test_draft_keeps_line_guides_and_unicode_without_touching_original(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);audio=root/"one.mp3";audio.write_bytes(b"audio")
             audio.with_suffix(".elrc").write_text(OLD)
             song=L.Song(str(audio),audio.name,size=5)
             with patch.object(L,"embedded",return_value=({"seconds":100},[])):
                 path=drafts.create(str(root/"app"),song)
-            self.assertEqual(Path(path).read_text(),"old words\n")
+            self.assertEqual(Path(path).read_text(),"[00:01.000]old words\n")
             self.assertEqual(audio.with_suffix(".elrc").read_text(),OLD)
             path=drafts.create(str(root/"app"),song,"English\nفارسی")
             self.assertEqual(Path(path).read_text(encoding="utf-8"),"English\nفارسی\n")

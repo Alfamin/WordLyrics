@@ -39,7 +39,7 @@ internal static class WorkflowTests
     {
         var app = Path.Combine(_root, "tool");
         var module = Path.Combine(app, "wordlyrics"); Directory.CreateDirectory(module);
-        File.WriteAllText(Path.Combine(module, "__init__.py"), "__version__ = \"1.6.0\"\n");
+        File.WriteAllText(Path.Combine(module, "__init__.py"), "__version__ = \"1.6.1\"\n");
         File.WriteAllText(Path.Combine(app, "WordLyrics.bat"), "@echo off\r\nexit /b 99\r\n");
         File.WriteAllText(Path.Combine(module, "runner.py"), "import runpy\nrunpy.run_module('wordlyrics',run_name='__main__')\n");
         File.WriteAllText(Path.Combine(module, "__main__.py"), """
@@ -67,16 +67,24 @@ internal static class WorkflowTests
         Check(tool.Installed && !tool.TooOld, "new backend version recognized");
         Check(!tool.Ready, "missing Python/models never presented as ready");
         Check(tool.SetupText().Contains("irm https://"), "incomplete installation still offers the installer");
-        foreach (var name in new[] { "firststart.py", "menu.py", "library.py", "repair.py", "drafts.py", "search.py" }) File.WriteAllText(Path.Combine(module,name),"# fixture");
+        foreach (var name in new[] { "firststart.py", "menu.py", "library.py", "repair.py", "drafts.py", "search.py", "guides.py" }) File.WriteAllText(Path.Combine(module,name),"# fixture");
         File.WriteAllText(Path.Combine(app,"requirements.txt"),"# fixture");
         Check(!tool.SetupText().Contains("irm https://") && tool.SetupText().Contains("Reusing the installed"), "complete local setup does not fetch GitHub's installer again");
+        File.WriteAllText(Path.Combine(module, "__init__.py"), "__version__ = \"1.6.0\"\n");
+        Check(tool.TooOld && tool.SetupText().Contains("irm https://"), "old backend with timestamp stripping must update before new editor/repair work");
+        File.WriteAllText(Path.Combine(module, "__init__.py"), "__version__ = \"1.6.1\"\n");
+        File.Delete(Path.Combine(module,"guides.py"));
+        Check(tool.SetupText().Contains("irm https://"), "missing line-guide component is not treated as complete offline setup");
+        File.WriteAllText(Path.Combine(module,"guides.py"),"# fixture");
         var repairInfo = tool.RequestInfo(new[] { "repair-song", paths[0], "--lyrics-file", Path.Combine(data, "words %TEMP% & فارسی.txt") });
         Check(!repairInfo.Arguments.Contains(paths[0]), "song repair paths never enter cmd command text");
         var repairArgs = JsonSerializer.Deserialize<string[]>(repairInfo.Environment["WORDLYRICS_LAUNCH_REQUEST"]!);
         Check(repairArgs![1] == paths[0] && repairArgs[3].Contains("%TEMP% & فارسی"), "repair song/draft arguments survive literally in JSON");
         var oldLyrics = Path.ChangeExtension(paths[0], ".elrc");
         File.WriteAllText(oldLyrics, "[ar:Artist]\n[00:01.00]<00:01.00>alpha<00:02.00> beta\n");
-        Check(LyricEditorWindow.ExistingWords(paths[0]) == "alpha beta", "editor imports current words without old timestamps");
+        Check(LyricEditorWindow.ExistingWords(paths[0]) == "[00:01.00]alpha beta", "editor keeps line guides while removing old word timestamps");
+        File.WriteAllText(oldLyrics, "[offset:500]\n[ar:Artist]\n[00:01.00]<00:01.00>alpha<00:02.00> beta\n");
+        Check(LyricEditorWindow.ExistingWords(paths[0]).Contains("[offset:500]") && !LyricEditorWindow.ExistingWords(paths[0]).Contains("[ar:"), "editor preserves LRC offsets while discarding display metadata");
         Environment.SetEnvironmentVariable("WORDLYRICS_PYTHON", python);
         var process = tool.StartQuietRun(music, list, result, Path.Combine(data, "last run.log"), "half", "", true, progress);
         Check(process.WaitForExit(15000), "synthetic backend finishes"); process.WaitForExit();
@@ -144,7 +152,7 @@ internal static class WorkflowTests
         window.Close();
         var host = new Host(Path.Combine(_root, "ui", "plugin-data", "dev.moshi.wordlyrics"));
         var plugin = new WordLyricsPlugin(); plugin.Initialize(host);
-        Check(host.Commands == 3 && plugin.Info.Version == "1.2.0", "plugin registers timing, repair and custom editor without launching work");
+        Check(host.Commands == 3 && plugin.Info.Version == "1.2.1", "plugin registers timing, repair and custom editor without launching work");
         host.Raise("progress"); Dispatcher.UIThread.RunJobs();
         var panel = Field<ProgressWindow>(plugin, "_progress");
         Check(panel.IsVisible, "progress can be opened from settings");

@@ -565,7 +565,7 @@ internal sealed class Worker : IDisposable
                 "lines_only" => $"Line-by-line lyrics written (words could not be timed): {title}",
                 "no_lyrics" => $"No lyrics were found for: {title}",
                 "network_error" => $"Lyric provider unavailable. Open WordLyrics progress for the connection error: {title}",
-                "rejected" => $"The lyrics found online do not match the recording: {title}",
+                "rejected" => $"The model could not confirm the online lyrics for this recording: {title}",
                 "not_timed" => $"The lyrics could not be timed well enough: {title}",
                 "skipped" => asked ? $"Nothing to do (it already has word-by-word lyrics, or a twin file gets them): {title}" : null,
                 "left_out" => asked ? $"WordLyrics could not use this file: {title}" : null,

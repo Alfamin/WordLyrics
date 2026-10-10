@@ -56,6 +56,8 @@ class Song:
     retime_sha256: str = ""
     superseded: dict = field(default_factory=dict)  # explicitly flagged higher-priority sidecars and their hashes
     previous_tier: int | None = None
+    keep_words: bool = False
+    timing_note: str = ""
     has_lrc: bool = False
     skip: str = ""                 # set when the song is not to be handled at all, with the reason
     # filled in while running
@@ -386,18 +388,21 @@ def read_song(path, rel, size, *, redo=False, retime_mode="current", lyrics_file
     if best:
         s.tier, s.lyrics_from, s.text = best
     if redo:
-        from .sources import plain_words
+        from .guides import prepare
+        s.keep_words=retime_mode!="fresh"
         s.previous_tier=classify(existing_word) if existing_word is not None else s.tier
         if retime_mode=="fresh":
             s.tier,s.text=NONE,""
         elif existing_word is not None:
-            s.text=WORD_TAG.sub("",existing_word) if retime_mode=="guided" else plain_words(existing_word)
-            s.tier=LINE if retime_mode=="guided" and classify(s.text)==LINE else PLAIN
+            reference=best[2] if best and best[0]>=LINE else ""
+            s.text,guided,s.timing_note=prepare(existing_word,reference,s.seconds,unanchored=retime_mode=="unanchored")
+            s.tier=LINE if guided else PLAIN
             s.lyrics_from="existing words (retiming)"
-        elif s.tier==WORD or (s.tier==LINE and retime_mode=="current"):
-            s.text,s.tier=plain_words(s.text),PLAIN
+        elif s.tier in (WORD,LINE,PLAIN):
+            s.text,guided,s.timing_note=prepare(s.text,duration=s.seconds,unanchored=retime_mode=="unanchored")
+            s.tier=LINE if guided else PLAIN
     if lyrics_file:
-        from .sources import plain_words
+        from .guides import prepare
         if os.path.islink(lyrics_file):
             s.skip="a linked lyric input is protected"
             return s
@@ -406,11 +411,15 @@ def read_song(path, rel, size, *, redo=False, retime_mode="current", lyrics_file
         if len(raw)>2_000_000:
             s.skip="the supplied lyric file is too large"
             return s
-        s.text,s.tier=plain_words(raw.decode("utf-8-sig")),PLAIN
+        reference=existing_word or (best[2] if best and best[0]>=LINE else "")
+        s.text,guided,s.timing_note=prepare(raw.decode("utf-8-sig"),reference,s.seconds,unanchored=retime_mode=="unanchored")
+        s.tier=LINE if guided else PLAIN
+        s.keep_words=True
         s.lyrics_from="chosen lyric file"
+        if not s.text.strip():s.skip="invalid supplied lyric file: no sung words; paste complete lyrics or choose another file"
     if s.tier == WORD and not s.skip:
         s.skip = "already has word-by-word lyrics"
-    if not s.skip and not lyrics_file and not ignore_source and os.path.lexists(base+".lyrics-source.txt"):
+    if not s.skip and not lyrics_file and not ignore_source and not (s.keep_words and s.text) and os.path.lexists(base+".lyrics-source.txt"):
         from .sources import genius_song_url
         pin=base+".lyrics-source.txt"
         try:

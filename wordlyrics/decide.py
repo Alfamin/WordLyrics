@@ -43,15 +43,24 @@ def judge(feat, attempts):
         "keep_lines": (text, info) for found line-timed lyrics that are right but could not be word-timed, or None,
         "last": info of the last attempt that did not work, or None}"""
     last = keep = None
+    expanded=[]
     for attempt in attempts:
+        expanded.append(attempt)
+        if attempt[0]=="line":
+            from .guides import words
+            # Broken guide positions must not strand otherwise correct words. This is
+            # CPU alignment using the SAME model hearing, with the strict plain gate.
+            expanded.append(("plain",words(attempt[1]),attempt[2],attempt[2]=="found"))
+    for attempt in expanded:
         mode, text, whose = attempt[:3]
         require_audio_match = bool(attempt[3]) if len(attempt) > 3 else False
         fits, ratio = T.belongs(feat, text, plain=(mode == "plain"))
         info = {"mode": mode, "lyrics": whose, "fits_recording": {True: "yes", False: "no", None: "cannot tell"}[fits], "fit_ratio": ratio}
         if whose == "found" and (fits is False or (require_audio_match and fits is not True)):
             # lyrics from the internet that do not belong to this recording are never written
-            reason = "the lyrics found online do not match what is sung" if fits is False else \
-                     "the online lyrics could not be confirmed against this recording"
+            reason = "the model could not confirm that these online lyrics match this recording"
+            if fits is False and ratio is not None:
+                reason += " (match score %.3f, minimum %.2f)" % (ratio,T.FITS_PLAIN if mode=="plain" else T.FITS_LINE)
             last = dict(info, status="rejected", reason=reason)
             continue
         if mode == "line":
@@ -69,7 +78,10 @@ def judge(feat, attempts):
                     words=st.get("words"), confidence=grade)
         if mode == "plain":
             info.update(plain_passes=st.get("plain_passes",1), plain_refinement=st.get("plain_refinement","off"))
+            info.update(lines_unsure=st.get("lines_unsure"), acceptance_check="untimed lyrics: at most 20% low-confidence lines and 5% unheard lines")
         if refused:
+            if mode=="plain" and "unsure" in refused:
+                refused += ". This is model uncertainty, not a measured timing error rate. Supply synced LRC line guides or keep existing guides when retiming."
             last = dict(info, status="not_timed", reason=refused, confidence="")
             if whose == "found" and mode == "line" and elrc is not None and not problems and fits:
                 keep = (text, dict(last))                  # right lyrics with line times: still worth having

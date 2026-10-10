@@ -26,7 +26,7 @@ internal sealed class Tool
     public bool Installed => File.Exists(Bat);
 
     /// <summary>The first WordLyrics that can be given single songs and reports what it did with them.</summary>
-    private static readonly Version Needed = new(1, 6, 0);
+    private static readonly Version Needed = new(1, 6, 1);
 
     /// <summary>Installed, but from before it could be handed single songs.</summary>
     public bool TooOld
@@ -177,7 +177,7 @@ internal sealed class Tool
 
     internal string SetupText()
     {
-        var complete = Installed && !TooOld && new[] { "__main__.py", "runner.py", "firststart.py", "menu.py", "library.py", "repair.py", "drafts.py", "search.py" }
+        var complete = Installed && !TooOld && new[] { "__main__.py", "runner.py", "firststart.py", "menu.py", "library.py", "repair.py", "drafts.py", "search.py", "guides.py" }
             .All(name => File.Exists(Path.Combine(Folder, "wordlyrics", name))) && File.Exists(Path.Combine(Folder,"requirements.txt"));
         return complete ? SetupScript.Replace(DownloadInstaller, "echo  Reusing the installed WordLyrics program. Existing Python/packages/models are checked before any download.") : SetupScript;
     }

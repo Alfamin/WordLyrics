@@ -18,7 +18,7 @@ GROUPS = [
     ("not_timed", "Lyrics present, but could not be timed well enough", "Nothing was written for these. Their existing lyrics are untouched."),
     ("no_lyrics", "No usable lyrics found", "No usable lyric source was found for this run. Existing lyric files, if any, were preserved."),
     ("network_error", "Lyric provider unavailable", "The search could not be completed because a provider could not be reached. Check the connection diagnostics and retry these songs."),
-    ("rejected", "Lyrics found online, but rejected", "The lyrics found did not match what is sung in the file, so nothing was written."),
+    ("rejected", "Online lyrics could not be confirmed", "The model's match check did not confirm these lyrics for this recording; nothing was written."),
     ("failed", "Could not be read", "The audio of these files could not be used."),
     ("not_reached", "Not reached", "The run was stopped before these songs. Run again to continue; finished songs are skipped."),
 ]
@@ -39,6 +39,8 @@ def detail(s):
         bits.append("confidence " + r["confidence"])
     if r.get("reason"):
         bits.append(r["reason"])
+    if r.get("timing_note"):
+        bits.append(r["timing_note"])
     if r.get("files"):
         bits.append("wrote " + " + ".join(r["files"]))
     return "; ".join(b for b in bits if b)

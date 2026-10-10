@@ -198,17 +198,8 @@ class GeniusText(HTMLParser):
 
 def plain_words(value):
     """Discard ALL provider times. Preserve words and line order for our own model."""
-    from . import library as L
-    from .timing import HEADING_RE
-    out = []
-    for line in (value or "").replace("\r\n", "\n").replace("\r", "\n").splitlines():
-        if L.META_TAG.match(line):
-            continue
-        line = re.sub(r"^\s*\[\d+:\d+(?:[.:]\d+)?\]", "", line)
-        line = L.WORD_TAG.sub("", line).strip()
-        if line and not HEADING_RE.match(line):
-            out.append(line)
-    return "\n".join(out)
+    from .guides import words
+    return words(value)
 
 
 def genius_page(client,song,url,stop=None,*,record=0,title_sim=0.0,seconds_off=0.0,pinned=False):

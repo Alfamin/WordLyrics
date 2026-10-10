@@ -67,8 +67,10 @@ source choices, a complete-library rerun, reports and restoration, settings, and
 Lists show 25 songs per page, with search and stable numbered selections such as `1,3-5`. You can also
 drop selected audio files into the rerun menu. Persian and Arabic number keys work too.
 
-For a rerun, choose current words without old times (useful for delayed lyrics), current words with
-line guides, or fresh lyrics from the providers. Replacements require a byte-verified original backup;
+For a rerun, **Keep words and redo timing** retains valid line guides and recalculates every word
+from the audio. It keeps your exact words and ignores saved provider choices. The advanced menu also
+offers locating the current words entirely from scratch (useful for badly delayed line guides), or
+fetching fresh lyrics from the providers. Replacements require a byte-verified original backup;
 the accepted candidate and recovery record are saved before replacing the `.elrc`. A rejected result
 keeps the original. A whole-library rerun asks for confirmation twice and can take hours.
 Ordinary generation and timing-only reruns protect `.ttml` and `.lyricsfile` files because those formats
@@ -83,7 +85,14 @@ title, artist, album and filename, across selected folders. Results show numbere
 close spelling suggestions are labelled. Select a song, then fresh automatic lookup, keep words and
 retime, choose Genius / LRCLIB / a text file, or edit/paste custom lyrics. The text editor works on a
 private draft; correcting a line does not modify the active lyrics until an approved timing run succeeds.
-Custom and manually chosen LRCLIB words discard provider timestamps and are timed again by the model.
+Custom synced LRC/ELRC inputs and manually chosen LRCLIB results retain valid **line** timestamps as
+rough guides; old word timestamps are always recalculated by the model. The app and terminal editors
+keep the visible line guides. A small plain-text correction can reuse existing guides only when line
+order/count match and at least 90% of lines remain unchanged. A larger rewrite starts from scratch.
+Malformed, backwards, conflicting-offset, mixed or out-of-recording guides are ignored with a reason
+in the report. Repeated LRC chorus timestamps expand in chronological order, and global offsets apply.
+If a guided alignment fails, the same words get one strict unanchored attempt using the same hearing;
+there is no extra GPU model pass. Incorrect online lyrics still fail the recording checks.
 After you choose or edit the words, timing uses them locally without another online lyric lookup.
 Genius pages still pass the recording/audio gates; automatic runs never wait for a manual source choice.
 
@@ -125,7 +134,8 @@ with songs that still need word timing; **0** means no incomplete outcomes, **3*
 busy, and **130** means canceled. A skipped existing lyric file is explained in the report.
 `--retry` also asks the lyric sources again instead of reusing cached answers.
 Automation and the Noctis background worker continue to use `--yes`: no menu or per-song questions.
-Advanced selected-song reruns use `--redo --retime-mode current|guided|fresh --yes`; a selected-song
+Advanced selected-song reruns use `--redo --retime-mode current|guided|unanchored|fresh --yes`; `current`
+and `guided` keep valid line guides, while `unanchored` explicitly discards them. A selected-song
 list can use `--songs-from`. A whole-folder `--redo` additionally requires `--confirm-redo`, which
 the numbered menu supplies only after both confirmations. `--lyrics-file FILE` accepts a UTF-8
 lyric text file for exactly one selected song.

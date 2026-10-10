@@ -146,6 +146,7 @@ class Run:
         self.screen.tally = "   ".join("%s %d" % (label, self.counts[k]) for k, label in names if self.counts.get(k))
 
     def record(self, song, **result):
+        if song.timing_note:result.setdefault("timing_note",song.timing_note)
         song.result.update(result)
         if self.log:
             row = {"song": song.rel, "time": datetime.now().isoformat(timespec="seconds")}
@@ -530,6 +531,16 @@ class Run:
         if song.lyrics_url:
             return [("plain",f.text,"found",True)] if f is not None and f.pinned else []
         masked = fetch.wants_uncensored(song) and fetch.censored(song.text)
+        if song.keep_words:
+            if masked:return []  # changing censored words requires Fresh / explicit edited words
+            if song.tier==L.LINE:return [("line",song.text,"yours")]
+            if song.tier==L.PLAIN:
+                if f is not None and f.tier==L.LINE and self.opts.retime_mode!="unanchored":
+                    from .guides import remap
+                    guided=remap(song.text,f.text,song.seconds)
+                    if guided:return [("line",guided,"yours")]
+                return [("plain",song.text,"yours")]
+            return []
         if masked:
             if f is not None and fetch.text_sim(f.text, song.text) >= 0.60:
                 out.append(("line" if f.tier == L.LINE else "plain", f.text, "found", True))

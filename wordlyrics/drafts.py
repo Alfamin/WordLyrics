@@ -5,7 +5,7 @@ import subprocess
 import uuid
 
 from . import files,library as L
-from .sources import plain_words
+from .guides import WORD
 
 
 def create(home,song,text=None,label="custom"):
@@ -16,7 +16,7 @@ def create(home,song,text=None,label="custom"):
     folder=Path(home)/"lyric drafts";folder.mkdir(parents=True,exist_ok=True)
     if folder.is_symlink() or L._is_junction(str(folder)):raise OSError("Linked lyric-draft folders are protected")
     path=folder/(label+"-"+uuid.uuid4().hex+".txt")
-    if not files.create_new(path,(plain_words(text)+"\n").encode("utf-8")):raise OSError("Draft already exists")
+    if not files.create_new(path,(WORD.sub("",text).strip()+"\n").encode("utf-8")):raise OSError("Draft already exists")
     return str(path)
 
 

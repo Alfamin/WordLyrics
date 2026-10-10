@@ -92,7 +92,8 @@ def parser():
     ap.add_argument("--quick-backup", action="store_true", help="backup without reading every copied file back (faster, less thorough)")
     ap.add_argument("--retry", action="store_true", help="try again the songs an earlier run could not time (normally skipped while nothing about them changed)")
     ap.add_argument("--redo",action="store_true",help="explicitly retime existing Enhanced LRC after a verified backup")
-    ap.add_argument("--retime-mode",choices=["current","guided","fresh"],default="current")
+    ap.add_argument("--retime-mode",choices=["current","guided","unanchored","fresh"],default="current",
+                    help="current/guided keep words and valid line guides; unanchored discards guides; fresh fetches new words")
     ap.add_argument("--confirm-redo",action="store_true",help="confirmation supplied by the interactive menu for a library rerun")
     ap.add_argument("--lyrics-file",help="use this plain lyric file for exactly one selected song")
     ap.add_argument("--repair-lyrics",action="store_true",help="explicitly replace flagged higher-priority lyric sidecars after accepted fresh timing; selected songs only")

@@ -21,7 +21,7 @@ internal sealed class LyricEditorWindow : Window
         var content = new DockPanel { Margin = new Thickness(22), LastChildFill = true };
         var heading = new StackPanel { Spacing = 8 };
         heading.Children.Add(new TextBlock { Text = title, FontSize = 22, FontWeight = FontWeight.Bold, Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap });
-        heading.Children.Add(new TextBlock { Text = "Correct a line, or replace the text with your complete lyrics. WordLyrics will discard old timestamps and time your words again. Audio and tags stay unchanged.", Foreground = Brushes.LightGray, TextWrapping = TextWrapping.Wrap });
+        heading.Children.Add(new TextBlock { Text = "Correct a line, or paste complete plain or synced LRC lyrics. Keep the [mm:ss] line guides when available; WordLyrics recalculates word timing from audio. Audio and tags stay unchanged.", Foreground = Brushes.LightGray, TextWrapping = TextWrapping.Wrap });
         heading.Children.Add(new TextBlock { Text = initial.Length == 0 ? "No readable LRC/text sidecar found. Paste the full lyrics below, or use Search / fix a song to import embedded words or choose Genius / LRCLIB." : "Current LRC/text words loaded. Check that this is the version you want; preferred TTML/Lyricsfile content is not imported here.", Foreground = Brushes.LightGray, TextWrapping = TextWrapping.Wrap });
         DockPanel.SetDock(heading, Dock.Top); content.Children.Add(heading);
         var footer = new StackPanel { Spacing = 8, Margin = new Thickness(0, 12, 0, 0) };
@@ -50,8 +50,8 @@ internal sealed class LyricEditorWindow : Window
                 var info = new FileInfo(file);
                 if (!info.Exists || info.Length > 2_000_000 || (info.Attributes & FileAttributes.ReparsePoint) != 0) continue;
                 var text = File.ReadAllText(file);
-                text = Regex.Replace(text, @"^\s*\[[a-zA-Z]{2,}:[^\]]*\]\s*$", "", RegexOptions.Multiline);
-                text = Regex.Replace(text, @"\[\d+:\d+(?:[.:]\d+)?\]|<\d+:\d+(?:[.:]\d+)?>", "");
+                text = Regex.Replace(text, @"^\s*\[(?!offset:)[a-zA-Z]{2,}:[^\]]*\]\s*$", "", RegexOptions.Multiline | RegexOptions.IgnoreCase);
+                text = Regex.Replace(text, @"<\d+:\d+(?:[.:]\d+)?>", "");
                 return text.Trim();
             }
             catch (IOException) { }
