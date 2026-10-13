@@ -129,7 +129,7 @@ internal sealed class Worker : IDisposable
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return "The song's file is not there.";
         if (!Audio.Contains(Path.GetExtension(path))) return "WordLyrics cannot read this kind of file.";
-        if (HasWordLyrics(path)) return "A lyric file already exists. To fix wrong words or timing, right-click this song and choose Wrong lyrics / redo with fresh lyrics (WordLyrics), or Edit / paste custom lyrics.";
+        if (HasWordLyrics(path) || EmbeddedWordLyrics.HasWords(path)) return "Word-timed lyrics already exist. To fix wrong words or timing, right-click this song and choose Wrong lyrics / redo with fresh lyrics (WordLyrics), or Edit / paste custom lyrics.";
         var tool = new Tool(Options.Folder);
         if (!tool.Ready) return NotReady(tool);
 
@@ -276,7 +276,7 @@ internal sealed class Worker : IDisposable
             if (file.Length == 0 || (!item.Asked && now - item.QuietSince < item.Quiet)) return false;
             // Still being written by whoever brought it?
             using (new FileStream(item.Path, FileMode.Open, FileAccess.Read, FileShare.Read)) { }
-            if (HasWordLyrics(item.Path))
+            if (HasWordLyrics(item.Path) || EmbeddedWordLyrics.HasWords(item.Path))
             {
                 item.Length = -2;
                 return false;
@@ -377,7 +377,7 @@ internal sealed class Worker : IDisposable
             foreach (var file in new DirectoryInfo(folder).EnumerateFiles("*", listing))
             {
                 if (_disposed) return;
-                if (file.CreationTimeUtc <= since || !Audio.Contains(file.Extension) || HasWordLyrics(file.FullName)) continue;
+                if (file.CreationTimeUtc <= since || !Audio.Contains(file.Extension) || HasWordLyrics(file.FullName) || EmbeddedWordLyrics.HasWords(file.FullName)) continue;
                 Consider(file.FullName, folder, QuietAfterCreate);
                 found++;
             }

@@ -340,6 +340,9 @@ def _main(argv=None):
             print("A lyrics-source file already exists; edit it yourself to change the choice.")
             return 2
         print("Saved source choice: "+pin)
+        from .source_choices import remember
+        try:remember(path,pin,HOME)
+        except (OSError,ValueError) as error:print("Source saved; move recovery unavailable: "+str(error))
         print("Run WordLyrics on that song. Existing word-timed files remain untouched.")
         return 0
     if argv[:1] == ["providers"]:

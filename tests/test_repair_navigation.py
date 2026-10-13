@@ -95,6 +95,14 @@ class NavigationTests(unittest.TestCase):
             with patch.object(L,'embedded',return_value=({'seconds':100},[])):m.song_actions([s])
             m.job.assert_called_once()
 
+    def test_back_from_genius_url_is_a_cancel_without_an_invalid_url_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            m,s=self.make(d,['3','1','0','2','0']);m.job=Mock()
+            with patch.object(L,'embedded',return_value=({'seconds':100},[])):m.song_actions([s])
+            m.job.assert_called_once()
+            self.assertFalse(Path(s.base+'.lyrics-source.txt').exists())
+            self.assertNotIn('not a public Genius','\n'.join(c.args[0] for c in m.say.call_args_list))
+
     def test_noctis_repair_launch_back_opens_main_menu_instead_of_exiting(self):
         with patch('wordlyrics.menu.Menu') as constructor:
             session=constructor.return_value;session.repair_path.return_value=4;session.run.return_value=0

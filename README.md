@@ -1,5 +1,12 @@
 # WordLyrics
 
+Version 1.6.3 recognizes Noctis's extra embedded lyric fields and word-style SYLT timing, so
+existing word timing is preserved. Source choices are remembered privately when selected or
+scanned: same-file moves retain them, and unchanged copies across drives are matched by SHA-256.
+Deleting or changing the original source file revokes its recovery choice. Similar titles and
+file sizes never select a source by themselves. Lyrics are not published if the recording moved
+or was replaced during timing; retry that song at its current location.
+
 Word-by-word timed lyrics for a local music folder. Point it at the folder, let it run, read the report.
 
 For every song it writes a `<song>.elrc` file next to the song (Enhanced LRC: each word has its own start

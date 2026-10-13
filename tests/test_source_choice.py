@@ -67,7 +67,7 @@ class SourceChoiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             audio=Path(d)/"example.flac"
             audio.write_bytes(b"unchanged audio")
-            with redirect_stdout(StringIO()):
+            with redirect_stdout(StringIO()),patch.object(cli,"HOME",d):
                 self.assertEqual(cli.main(["source",str(audio),URL]),0)
                 self.assertEqual(cli.main(["source",str(audio),"https://genius.com/Other-song-lyrics"]),2)
             self.assertEqual(audio.read_bytes(),b"unchanged audio")

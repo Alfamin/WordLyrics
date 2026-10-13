@@ -25,6 +25,9 @@ internal static class WorkflowTests
         var oldPython = Environment.GetEnvironmentVariable("WORDLYRICS_PYTHON");
         try
         {
+            Check(EmbeddedWordLyrics.HasWords("synthetic",_=>"[00:01.00]<00:01.00>alpha <00:01.50>beta"),"embedded word timing skips automatic model work");
+            Check(!EmbeddedWordLyrics.HasWords("synthetic",_=>"[00:01.00]alpha beta"),"line timing remains eligible for word alignment");
+            Check(!EmbeddedWordLyrics.HasWords("synthetic",_=>throw new IOException("unreadable")),"optional native reader failure leaves full worker fallback available");
             AppBuilder.Configure<TestApp>().UseSkia().UseHarfBuzz().UseHeadless(new AvaloniaHeadlessPlatformOptions { UseHeadlessDrawing = false }).SetupWithoutStarting();
             Backend(args[0]);
             Windows(args.Length > 1 ? args[1] : null);
@@ -39,7 +42,7 @@ internal static class WorkflowTests
     {
         var app = Path.Combine(_root, "tool");
         var module = Path.Combine(app, "wordlyrics"); Directory.CreateDirectory(module);
-        File.WriteAllText(Path.Combine(module, "__init__.py"), "__version__ = \"1.6.2\"\n");
+        File.WriteAllText(Path.Combine(module, "__init__.py"), "__version__ = \"1.6.3\"\n");
         File.WriteAllText(Path.Combine(app, "WordLyrics.bat"), "@echo off\r\nexit /b 99\r\n");
         File.WriteAllText(Path.Combine(module, "runner.py"), "import runpy\nrunpy.run_module('wordlyrics',run_name='__main__')\n");
         File.WriteAllText(Path.Combine(module, "__main__.py"), """
@@ -72,7 +75,7 @@ internal static class WorkflowTests
         Check(!tool.SetupText().Contains("irm https://") && tool.SetupText().Contains("Reusing the installed"), "complete local setup does not fetch GitHub's installer again");
         File.WriteAllText(Path.Combine(module, "__init__.py"), "__version__ = \"1.6.1\"\n");
         Check(tool.TooOld && tool.SetupText().Contains("irm https://"), "old backend with timestamp stripping must update before new editor/repair work");
-        File.WriteAllText(Path.Combine(module, "__init__.py"), "__version__ = \"1.6.2\"\n");
+        File.WriteAllText(Path.Combine(module, "__init__.py"), "__version__ = \"1.6.3\"\n");
         File.Delete(Path.Combine(module,"guides.py"));
         Check(tool.SetupText().Contains("irm https://"), "missing line-guide component is not treated as complete offline setup");
         File.WriteAllText(Path.Combine(module,"guides.py"),"# fixture");
@@ -152,7 +155,7 @@ internal static class WorkflowTests
         window.Close();
         var host = new Host(Path.Combine(_root, "ui", "plugin-data", "dev.moshi.wordlyrics"));
         var plugin = new WordLyricsPlugin(); plugin.Initialize(host);
-        Check(host.Commands == 3 && plugin.Info.Version == "1.2.2", "plugin registers timing, repair and custom editor without launching work");
+        Check(host.Commands == 3 && plugin.Info.Version == "1.2.3", "plugin registers timing, repair and custom editor without launching work");
         host.Raise("progress"); Dispatcher.UIThread.RunJobs();
         var panel = Field<ProgressWindow>(plugin, "_progress");
         Check(panel.IsVisible, "progress can be opened from settings");

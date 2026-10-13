@@ -156,6 +156,13 @@ class Run:
                 self.log.flush()
 
     def put_file(self, song, ext, text, kind):
+        if song.audio_identity is not None:
+            try:
+                current = os.stat(song.path, follow_symlinks=False)
+                if (current.st_dev,current.st_ino) != song.audio_identity:
+                    raise OSError("AUDIO_CHANGED: this song moved or was replaced during timing; retry it at its current location")
+            except FileNotFoundError:
+                raise OSError("AUDIO_MOVED: this song moved during timing; retry it at its current location") from None
         if ext==".elrc" and getattr(self.opts,"repair_lyrics",False):
             from .repair import Publication
             with Publication(self,song,file_bytes(text)) as transaction:
@@ -296,7 +303,12 @@ class Run:
                                      retime_mode=getattr(self.opts,"retime_mode","current"),
                                      lyrics_file=getattr(self.opts,"lyrics_file",None),
                                      repair_lyrics=getattr(self.opts,"repair_lyrics",False),
-                                     ignore_source=getattr(self.opts,"ignore_lyric_source",False))
+                                     ignore_source=getattr(self.opts,"ignore_lyric_source",False),source_home=self.home)
+                pin=os.path.splitext(path)[0]+".lyrics-source.txt"
+                if os.path.lexists(pin):
+                    from .source_choices import remember
+                    try:remember(path,pin,self.home)
+                    except (OSError,ValueError):out[i].result["source_move_note"]="The source choice stays valid here; its move recovery record could not be saved."
             except Exception as e:
                 s = L.Song(path=path, rel=rel, size=sz)
                 from .recovery import permission_error

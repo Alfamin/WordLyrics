@@ -58,6 +58,7 @@ class Song:
     previous_tier: int | None = None
     keep_words: bool = False
     timing_note: str = ""
+    audio_identity: tuple | None = None
     has_lrc: bool = False
     skip: str = ""                 # set when the song is not to be handled at all, with the reason
     # filled in while running
@@ -223,6 +224,38 @@ def adts_seconds(path):
     return blocks * 1024.0 / rate
 
 
+def sylt_text(frame):
+    """Read lyrics SYLT frames, retaining word-style line breaks and millisecond timing."""
+    if getattr(frame, "type", 1) != 1:
+        return ""
+    entries = [(text, ms) for text, ms in frame.text
+               if isinstance(text, str) and text.strip() and isinstance(ms, int) and ms >= 0]
+    if not entries:
+        return ""
+    if frame.format != 2:
+        return "\n".join(text.strip() for text, _ in entries)
+    entries.sort(key=lambda entry: entry[1])
+    stamp = lambda ms: "%02d:%06.3f" % (ms // 60000, (ms % 60000) / 1000)
+    word_style = any(text.startswith(("\n", "\r")) for text, _ in entries) and any(
+        not text.startswith(("\n", "\r")) for text, _ in entries)
+    if not word_style:
+        return "\n".join("[" + stamp(ms) + "]" + text.strip().replace("\r", " ").replace("\n", " ")
+                         for text, ms in entries)
+    lines, line = [], ""
+    for text, ms in entries:
+        starts_line = text.startswith(("\n", "\r"))
+        if starts_line and line:
+            lines.append(line.rstrip())
+            line = ""
+        if not line:
+            line = "[" + stamp(ms) + "]"
+        chunk = text.lstrip("\r\n").replace("\r", " ").replace("\n", " ")
+        line += "<" + stamp(ms) + ">" + chunk
+    if line:
+        lines.append(line.rstrip())
+    return "\n".join(lines)
+
+
 def embedded(path):
     """Tags and lyrics stored inside the file. -> (info dict, [lyrics texts])"""
     import mutagen
@@ -245,12 +278,13 @@ def embedded(path):
         info.update(artist=g("TPE1"), title=g("TIT2"), album=g("TALB"), albumartist=g("TPE2"))
         for fr in t.getall("USLT"):
             texts.append(fr.text)
+        for fr in t.getall("TXXX"):
+            if str(getattr(fr, "desc", "")).casefold() in (
+                    "lyrics", "unsyncedlyrics", "unsynced lyrics", "syncedlyrics", "synced lyrics"):
+                texts.extend(value for value in getattr(fr, "text", []) if isinstance(value, str))
         for fr in t.getall("SYLT"):
             try:
-                if fr.format == 2:
-                    texts.append("\n".join(f"[{int(ms) // 60000:02d}:{(ms % 60000) / 1000:05.2f}]{txt.strip()}" for txt, ms in fr.text))
-                else:
-                    texts.append("\n".join(txt for txt, _ in fr.text))
+                texts.append(sylt_text(fr))
             except Exception:
                 continue
     elif "MP4" in kind:
@@ -279,7 +313,7 @@ def embedded(path):
                     return low[k][0]
             return ""
         info.update(artist=g("artist"), title=g("title"), album=g("album"), albumartist=g("albumartist", "album artist"))
-        for k in ("lyrics", "unsyncedlyrics", "syncedlyrics"):
+        for k in ("lyrics", "unsyncedlyrics", "unsynced lyrics", "syncedlyrics", "synced lyrics"):
             texts += low.get(k, [])
     # Advisory flags distinguish explicit recordings from known clean recordings.
     advisory = None
@@ -324,10 +358,12 @@ def from_file_name(name):
     return (m.group("artist").strip(), m.group("title").strip()) if m else ("", "")
 
 
-def read_song(path, rel, size, *, redo=False, retime_mode="current", lyrics_file=None, repair_lyrics=False,ignore_source=False):
+def read_song(path, rel, size, *, redo=False, retime_mode="current", lyrics_file=None, repair_lyrics=False,ignore_source=False,source_home=None):
     """Everything known about one song without listening to it."""
     from . import audio
     s = Song(path=path, rel=rel, size=size)
+    audio_stat = os.stat(path, follow_symlinks=False)
+    s.audio_identity = (audio_stat.st_dev, audio_stat.st_ino)
     base = s.base
     existing_word=None
     with open(path,"rb") as readable:
@@ -437,6 +473,11 @@ def read_song(path, rel, size, *, redo=False, retime_mode="current", lyrics_file
             s.skip="invalid lyrics-source file (use one public Genius song URL)"
     if lyrics_file:
         s.lyrics_url=""
+    elif not s.skip and not ignore_source and not (s.keep_words and s.text) and not os.path.lexists(base+".lyrics-source.txt"):
+        from .source_choices import recover
+        chosen, problem = recover(path, source_home)
+        if problem:s.skip = problem
+        elif chosen and chosen != "auto":s.lyrics_url = chosen
     return s
 
 

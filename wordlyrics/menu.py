@@ -217,7 +217,13 @@ class Menu:
         def read(item):
             path,rel,size,_=item
             try:
-                return L.read_song(path,rel,size,redo=True,retime_mode="guided")
+                song=L.read_song(path,rel,size,redo=True,retime_mode="guided",source_home=self.home)
+                pin=os.path.splitext(path)[0]+".lyrics-source.txt"
+                if os.path.lexists(pin):
+                    from .source_choices import remember
+                    try:remember(path,pin,self.home)
+                    except (OSError,ValueError):song.result["source_move_note"]="The source choice stays valid here; its move recovery record could not be saved."
+                return song
             except Exception as e:
                 s=L.Song(path=path,rel=rel,size=size)
                 from .recovery import permission_error
@@ -570,7 +576,11 @@ class Menu:
             if not os.path.isfile(path) or os.path.islink(path):self.say("Choose an existing text file.");return
             self.job([s],redo=True,lyrics_file=os.path.abspath(path),mode_hint="current",repair_lyrics=selected_song is not None,automatic=False);return
         if action not in ("1","4"):return
-        url="auto" if action=="4" else genius_song_url(self.ask("Genius song URL (0 back): ",numbers=False))
+        if action=="4":url="auto"
+        else:
+            entered=self.ask("Genius song URL (0 back): ",numbers=False)
+            if entered=="0":return
+            url=genius_song_url(entered)
         if not url:self.say("That is not a public Genius song page.");return
         target=Path(s.base+".lyrics-source.txt")
         data=(url+"\r\n").encode("utf-8")
@@ -584,6 +594,9 @@ class Menu:
                 files.replace_backed_up(target,data,saved,old)
             else:files.create_new(target,data)
             self.say("Source choice saved. It will be used on the next run; automatic batches never wait for this step.")
+            from .source_choices import remember
+            try:remember(s.path,target,self.home)
+            except (OSError,ValueError) as error:self.say("Source saved; move recovery unavailable: "+str(error))
             self.catalog=None
         except OSError as e:self.say(str(e));return
         if self.ask("1 Rerun this song now   0 Back: ")=="1":
