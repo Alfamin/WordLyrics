@@ -19,6 +19,7 @@ from .audio import SR
 
 ALIGNER, SEPARATOR = "mms_fa_300m.onnx", "Kim_Vocal_2.onnx"
 WINDOW_S, CONTEXT_S = 30, 2
+RETRY_AFTER = (120, 300, 900, 1800)   # seconds until the graphics card is tried again after it failed (the last wait then repeats)
 
 
 def gpu_name():
@@ -39,8 +40,10 @@ def lift_quiet(voc, win_s=1.5, max_gain=8.0):
     """Slow automatic gain on the isolated voice: quiet phrases are brought up towards the loud ones."""
     hop = int(0.05 * SR)
     n = len(voc) // hop
+    if n == 0:
+        return voc.astype(np.float32)
     rms = np.sqrt((voc[: n * hop].reshape(n, hop).astype(np.float64) ** 2).mean(axis=1))
-    k = max(1, int(win_s / 0.05))
+    k = max(1, min(int(win_s / 0.05), n))                   # a clip shorter than the window: np.convolve would return more values than there are steps
     level = np.sqrt(np.convolve(rms ** 2, np.ones(k) / k, mode="same"))
     target = np.percentile(level, 90)
     floor = 0.03 * target                                   # below this it is silence: do not amplify noise
@@ -51,6 +54,10 @@ def lift_quiet(voc, win_s=1.5, max_gain=8.0):
 
 class Engine:
     """device: 'auto' (measure and take the faster one for each model), 'gpu' or 'cpu'."""
+
+    changed = None           # the run puts a function here; it is told when a model moves between graphics card and processor
+    gpu_lost = None          # model -> how many times the graphics card failed on it
+    gpu_retry = None         # model -> when (time.monotonic) the graphics card is tried again; only while the processor stands in
 
     def __init__(self, models_dir, device="auto", settings_path=None, say=lambda msg: None):
         import onnxruntime as ort
@@ -64,6 +71,7 @@ class Engine:
         self.gpu = gpu_name() if self.gpu_possible else ""
         self.where = {ALIGNER: "cpu", SEPARATOR: "cpu"}
         self.gpu_failures = 0
+        self.gpu_lost, self.gpu_retry = {}, {}
         self.pace = 1.0                      # share of the time the models may work (set by the speed choice)
         self.paused = False
         self.stop = None                     # threading.Event of the run, so a pause never outlives a stop
@@ -179,11 +187,44 @@ class Engine:
             return "graphics card" + (" (%s)" % self.gpu if self.gpu else "")
         if a == s == "cpu":
             return "processor (%d threads)" % (os.cpu_count() or 1) + (" - " + self.note if self.note else "")
+        if self.gpu_retry:
+            return "graphics card + processor (the graphics card failed on one model; it is tried again later)"
         return "graphics card + processor (each model where it is faster)"
 
     # ---------------------------------------------------------------- running
+    def _lost_gpu(self, model):
+        """The graphics card failed on this model: remember it, and when it is tried again (later each time)."""
+        if self.gpu_lost is None:
+            self.gpu_lost, self.gpu_retry = {}, {}
+        n = self.gpu_lost[model] = self.gpu_lost.get(model, 0) + 1
+        self.gpu_retry[model] = time.monotonic() + RETRY_AFTER[min(n, len(RETRY_AFTER)) - 1]
+
+    def _gpu_again(self, model):
+        """The processor is standing in for a failed graphics card: when it is time, see whether the card works
+        again. One real call proves it. Still the one listener: this runs between two model calls."""
+        if time.monotonic() < self.gpu_retry[model]:
+            return
+        try:
+            self._session(model, "gpu")
+            self._bench(model, "gpu")
+        except Exception:
+            self._drop(model, "gpu")
+            self._lost_gpu(model)                 # still not working: wait longer
+            return
+        del self.gpu_retry[model]
+        self.where[model] = "gpu"
+        self._drop(model, "cpu")
+        if not self.gpu_retry and self.note.startswith("GPU_FALLBACK"):
+            self.note = ""
+        self.say("The graphics card works again; going back to it")
+        if self.changed:
+            self.changed("")
+
     def _run(self, model, outs, feed):
-        """Run one model call. If the graphics card fails (usually out of memory), carry on with the processor."""
+        """Run one model call. If the graphics card fails (usually out of memory), carry on with the processor
+        and try the card again later."""
+        if self.gpu_retry and model in self.gpu_retry:
+            self._gpu_again(model)
         where = self.where[model]
         try:
             t = time.perf_counter()
@@ -196,8 +237,12 @@ class Engine:
             self.gpu_failures += 1
             self.where[model] = "cpu"
             self._drop(model, "gpu")
+            self._lost_gpu(model)
             self.note = "GPU_FALLBACK: the graphics card failed; continuing on the processor"
             self.say(self.note)
+            if self.changed:
+                self.changed("The graphics card failed during this run, so the processor took over for a while (much slower). "
+                             "The graphics card is tried again from time to time.")
             return self._session(model, "cpu").run(outs, feed)
 
     def _rest(self, worked):

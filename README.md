@@ -1,5 +1,11 @@
 # WordLyrics
 
+Version 1.6.4 is a reliability release: a graphics-card error no longer leaves the rest of a run on the
+processor, a short network outage only pauses a lyric source for a few minutes, Ctrl+C always ends
+cleanly, a file briefly held by another program is retried, and menu results stay on screen until
+you press Enter. The Noctis plugin's progress window can now Pause, Resume and Cancel a run
+(the plugin gives the program a small control file with the hidden option `--control FILE`).
+
 Version 1.6.3 recognizes Noctis's extra embedded lyric fields and word-style SYLT timing, so
 existing word timing is preserved. Source choices are remembered privately when selected or
 scanned: same-file moves retain them, and unchanged copies across drives are matched by SHA-256.
@@ -152,7 +158,8 @@ Other switches: `--speed full|half|light`, `--retry`, `--no-lrc`, `--quick-backu
 one path per line) and `--result FILE` (what happened to each song, as JSON).
 `--progress FILE` writes live stages/counts for the Noctis plugin. Exit status **4** means the run ended
 with songs that still need word timing; **0** means no incomplete outcomes, **3** means another run is
-busy, and **130** means canceled. A skipped existing lyric file is explained in the report.
+busy, and **130** means canceled (Ctrl+C, or Cancel in the Noctis progress window: the song being timed
+is finished, then the folder is checked and the report written). A skipped existing lyric file is explained in the report.
 `--retry` also asks the lyric sources again instead of reusing cached answers.
 Automation and the Noctis background worker continue to use `--yes`: no menu or per-song questions.
 Advanced selected-song reruns use `--redo --retime-mode current|guided|unanchored|fresh --yes`; `current`

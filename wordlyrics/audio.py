@@ -65,13 +65,13 @@ def load(path):
             raise Unusable("the audio is too damaged to read") from e
         if not mono:
             raise Unusable("the file has no audio")
-        wav = np.concatenate(mono).astype(np.float32)
+        wav = np.concatenate(mono).astype(np.float32, copy=False)
         if len(wav) < SR:
             raise Unusable("shorter than one second")
         if damaged and length and abs(len(wav) / SR - length) > 1.0:
             # after repairing, the length does not add up: the timing cannot be trusted, so do not use the file
             raise Unusable("damaged file: %.0f s readable of %.0f s" % (len(wav) / SR, length))
-    return wav, np.concatenate(stereo, axis=1).astype(np.float32)
+    return wav, np.concatenate(stereo, axis=1).astype(np.float32, copy=False)
 
 
 def to_mono_16k(x):
@@ -84,7 +84,7 @@ def to_mono_16k(x):
         fr.sample_rate = SR_SEP
         out += [f.to_ndarray().reshape(-1) for f in rs.resample(fr)]
     out += [f.to_ndarray().reshape(-1) for f in rs.resample(None)]
-    return np.concatenate(out).astype(np.float32)
+    return np.concatenate(out).astype(np.float32, copy=False)
 
 
 def probe(path):

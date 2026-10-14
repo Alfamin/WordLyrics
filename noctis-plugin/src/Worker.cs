@@ -36,6 +36,7 @@ internal sealed class Worker : IDisposable
     private const int MaxSongsPerRun = 200;
     private const int MaxTries = 2;
     private const int ExitAlreadyRunning = 3;
+    private const int ExitSetupFailed = 70;
 
     private readonly string _data;
     private readonly string _settingsFile;
@@ -53,15 +54,24 @@ internal sealed class Worker : IDisposable
     private DateTime _stateSaved = DateTime.MinValue;
     private DateTime _lastSeen;
     private bool _saidNotReady;
+    private bool _saidBadFolder;
     private bool _ticking;
     private bool _disposed;
+    private bool _paused;               // the user paused: no new batch starts until Resume; the waiting list is kept
+    private bool _cancelling;           // the user cancelled the run that is going; it is finishing the song it is on
+    private bool _controlled;           // the run that is going looks at the control file (so the buttons are shown)
+    private View _view = new("Starting WordLyrics", "", 0, 0, null, false);
+
+    /// <summary>What the last progress update of the program said (before pause and cancel are added to it).</summary>
+    private sealed record View(string Message, string Detail, int Completed, int Total, double? Fraction, bool EnginePaused);
 
     private sealed class Item
     {
         public string Path = "";
         public string Root = "";
         public bool Asked;              // the user asked for this song by hand
-        public int Tries;
+        public int Tries;               // runs that failed because of the song
+        public int Waits;               // runs that could not do anything (no internet, broken setup): see Backoff
         public DateTime Seen;
         public DateTime QuietSince;
         public TimeSpan Quiet = QuietAfterCreate;
@@ -97,10 +107,72 @@ internal sealed class Worker : IDisposable
     public Options Options
     {
         get { lock (_gate) return _options; }
-        set { lock (_gate) _options = value; }
+        set { lock (_gate) { _options = value; _saidBadFolder = false; } } // a changed setting may be the repair
     }
 
     public string SettingsFile => _settingsFile;
+
+    /// <summary>How long the program gets to stop after Cancel before it is stopped by force.</summary>
+    internal TimeSpan CancelGrace { get; set; } = TimeSpan.FromMinutes(3);
+
+    /// <summary>
+    /// Pause (true) or Resume (false), from the progress window. The program rests between two steps of
+    /// the models; meanwhile no new batch is started and the waiting songs stay on the list.
+    /// </summary>
+    public void SetPaused(bool paused)
+    {
+        var resumed = false;
+        lock (_gate)
+        {
+            if (_disposed || _paused == paused) return;
+            _paused = paused;
+            if (_run is not null && _controlled && !_cancelling) WriteControl(paused ? "pause" : "run");
+            if (_run is null && !paused)
+            {
+                resumed = true;
+                _progress(new ProgressState("Resumed", _items.Count == 0 ? "Nothing is waiting." : $"{_items.Count} song{(_items.Count == 1 ? " is" : "s are")} waiting and start in a moment."));
+            }
+            else Emit();
+        }
+        if (resumed) _timer.Change(TimeSpan.Zero, Tick);
+    }
+
+    /// <summary>
+    /// Cancel, from the progress window: the program finishes the song it is timing and stops. When it
+    /// has ended, the songs of this batch that it did not reach and every song still waiting are taken
+    /// off the list (see <see cref="Finished"/>); a stop by the user is no failed try for any song.
+    /// </summary>
+    public void Cancel()
+    {
+        Process? active;
+        lock (_gate)
+        {
+            active = _run;
+            if (_disposed || active is null || !_controlled || _cancelling) return;
+            _cancelling = true;
+            _paused = false;
+            WriteControl("stop");
+            Emit();
+        }
+        // A program that does not react (stuck in a model call, say) is stopped by force after a while.
+        Task.Run(async () =>
+        {
+            try { await Task.Delay(CancelGrace).ConfigureAwait(false); }
+            catch (Exception) { return; }
+            Job? job;
+            lock (_gate)
+            {
+                if (!ReferenceEquals(_run, active)) return;
+                job = _job;
+            }
+            Safe(() => _log("WordLyrics did not stop by itself in time; it is stopped now"));
+            Safe(() =>
+            {
+                if (job is not null) job.Dispose();
+                else if (!active.HasExited) active.Kill(entireProcessTree: true);
+            });
+        });
+    }
 
     /// <summary>The Noctis library folders that exist right now.</summary>
     public IReadOnlyList<string> LibraryFolders()
@@ -174,6 +246,7 @@ internal sealed class Worker : IDisposable
                 else if (!run.HasExited) run.Kill(entireProcessTree: true);
             }
             catch (Exception ex) { Safe(() => _log($"WordLyrics could not be stopped: {ex.GetType().Name}: {ex.Message}")); }
+            Quietly(() => File.Delete(ControlFile));
         }
     }
 
@@ -210,6 +283,7 @@ internal sealed class Worker : IDisposable
                 SaveState();
             }
             if (_run is not null || _items.Count == 0) return;
+            if (_paused) return;            // paused by the user: the waiting songs stay on the list until Resume
             waiting = _items.Values.ToList();
         }
 
@@ -230,7 +304,21 @@ internal sealed class Worker : IDisposable
         var batch = ripe.Where(i => i.Asked == ripe[0].Asked && SamePath(i.Root, ripe[0].Root)).Take(MaxSongsPerRun).ToList();
 
         var options = Options;
-        var tool = new Tool(options.Folder);
+        Tool tool;
+        try { tool = new Tool(options.Folder); }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or IOException)
+        {
+            // Said once, not at every tick; the next change of a setting lets it be said again.
+            if (!_saidBadFolder)
+            {
+                _saidBadFolder = true;
+                var message = $"The WordLyrics folder in the plugin settings is not a usable folder name ({ex.GetType().Name}). Correct it in Settings → Plugins → WordLyrics; the waiting songs are kept.";
+                _log(message); _notify(message);
+                _progress(new ProgressState("Setup is needed", message, Error: true, Finished: true));
+            }
+            return;
+        }
+        _saidBadFolder = false;
         if (!tool.Ready)
         {
             if (!_saidNotReady)
@@ -314,11 +402,11 @@ internal sealed class Worker : IDisposable
                     var watcher = new FileSystemWatcher(folder)
                     {
                         IncludeSubdirectories = true,
-                        NotifyFilter = NotifyFilters.FileName,
+                        NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName,
                         InternalBufferSize = 64 * 1024,
                     };
-                    watcher.Created += (_, e) => Safe(() => Consider(e.FullPath, folder, QuietAfterCreate));
-                    watcher.Renamed += (_, e) => Safe(() => Consider(e.FullPath, folder, QuietAfterRename));
+                    watcher.Created += (_, e) => Safe(() => Noticed(e.FullPath, folder, QuietAfterCreate));
+                    watcher.Renamed += (_, e) => Safe(() => Noticed(e.FullPath, folder, QuietAfterRename));
                     watcher.Error += (_, e) => Safe(() => OnWatcherError(folder, e.GetException()));
                     watcher.EnableRaisingEvents = true;
                     _watchers[folder] = watcher;
@@ -344,10 +432,43 @@ internal sealed class Worker : IDisposable
         CatchUp(since); // whatever arrived while nobody was looking
     }
 
-    /// <summary>A file appeared (or got its final name) in a library folder.</summary>
-    private void Consider(string path, string root, TimeSpan quiet)
+    /// <summary>Something appeared (or got its final name) in a library folder: a song, or a folder that may hold songs.</summary>
+    private void Noticed(string path, string root, TimeSpan quiet)
     {
-        if (!Audio.Contains(Path.GetExtension(path))) return;
+        if (Audio.Contains(Path.GetExtension(path))) { Consider(path, root, quiet); return; }
+        // A folder moved or copied in is announced by itself, not by the songs inside it; looking
+        // inside happens on a thread of its own so that the watcher is never kept waiting.
+        if (Directory.Exists(path)) Task.Run(() => Safe(() => ConsiderFolder(path, root, quiet)));
+    }
+
+    /// <summary>The songs inside a folder that was moved, copied or renamed into a library folder.</summary>
+    private void ConsiderFolder(string folder, string root, TimeSpan quiet)
+    {
+        var listing = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint };
+        var found = 0;
+        try
+        {
+            foreach (var file in new DirectoryInfo(folder).EnumerateFiles("*", listing))
+            {
+                if (_disposed) return;
+                if (!Audio.Contains(file.Extension) || HasWordLyrics(file.FullName)) continue;
+                if (Consider(file.FullName, root, quiet, save: false)) found++;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // gone again already (a temporary name), or not ours to read: what was found stays
+        }
+        if (found == 0) return;
+        lock (_gate)
+            if (!_disposed) SaveState();
+        _log($"{found} songs arrived inside the folder {folder}");
+    }
+
+    /// <summary>A file appeared (or got its final name) in a library folder. True when it was added to the list.</summary>
+    private bool Consider(string path, string root, TimeSpan quiet, bool save = true)
+    {
+        if (!Audio.Contains(Path.GetExtension(path))) return false;
         // Taken now, so that the quiet time counts from this moment and not from the first look.
         long length = -1;
         var stamp = default(DateTime);
@@ -360,9 +481,10 @@ internal sealed class Worker : IDisposable
         var now = DateTime.UtcNow;
         lock (_gate)
         {
-            if (_disposed || !_options.Auto || _items.ContainsKey(path)) return;
+            if (_disposed || !_options.Auto || _items.ContainsKey(path)) return false;
             _items[path] = new Item { Path = path, Root = root, Seen = now, QuietSince = now, Quiet = quiet, NotBefore = now, Length = length, Stamp = stamp };
-            SaveState();
+            if (save) SaveState();
+            return true;
         }
     }
 
@@ -392,6 +514,7 @@ internal sealed class Worker : IDisposable
     private string OutputFile => Path.Combine(_data, "last run.log");
     private string ProgressFile => Path.Combine(_data, "progress.json");
     private string StateFile => Path.Combine(_data, "state.json");
+    private string ControlFile => Path.Combine(_data, "control.txt");
 
     private void Start(Tool tool, List<Item> batch, Options options)
     {
@@ -399,15 +522,22 @@ internal sealed class Worker : IDisposable
         File.Delete(ResultFile);
         File.Delete(ProgressFile);
         var speed = options.Speed.ToLowerInvariant() is "full" or "half" or "light" ? options.Speed.ToLowerInvariant() : "half";
+        // Pause and Cancel need a program that looks at a control file (1.6.4 on); an older one runs without the buttons.
+        var controlled = tool.SupportsControl;
         Process run;
         lock (_gate)
         {
             if (_disposed || _run is not null) return;
-            run = _run = tool.StartQuietRun(batch[0].Root, ListFile, ResultFile, OutputFile, speed, options.Backup, retry: batch[0].Asked, ProgressFile);
+            if (controlled) WriteControl(_paused ? "pause" : "run");
+            run = _run = tool.StartQuietRun(batch[0].Root, ListFile, ResultFile, OutputFile, speed, options.Backup, retry: batch[0].Asked, ProgressFile,
+                controlled ? ControlFile : null);
             _job = Job.Around(run);
+            _controlled = controlled;
+            _cancelling = false;
+            _view = new View("Starting WordLyrics", $"{batch.Count} songs queued. Preparing backup and lyric search...", 0, batch.Count, null, false);
         }
         _log($"started WordLyrics on {batch.Count} song{(batch.Count == 1 ? "" : "s")} ({speed} speed)");
-        _progress(new ProgressState("Starting WordLyrics", $"{batch.Count} songs queued. Preparing backup and lyric search...", Total: batch.Count));
+        lock (_gate) Emit();
         Task.Run(async () =>
         {
             try { await run.WaitForExitAsync().ConfigureAwait(false); }
@@ -442,8 +572,13 @@ internal sealed class Worker : IDisposable
                         var count = stage.GetProperty("total").GetDouble();
                         fraction = count > 0 ? Math.Clamp(stage.GetProperty("done").GetDouble() / count, 0, 1) : null;
                     }
+            var enginePaused = root.TryGetProperty("paused", out var rests) && rests.ValueKind == JsonValueKind.True;
             lock (_gate)
-                if (ReferenceEquals(_run, active)) _progress(new ProgressState(message, detail, completed, total, fraction));
+                if (ReferenceEquals(_run, active))
+                {
+                    _view = new View(message, detail, completed, total, fraction, enginePaused);
+                    Emit();
+                }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or KeyNotFoundException or FormatException) { }
     }
@@ -478,7 +613,7 @@ internal sealed class Worker : IDisposable
                     foreach (var song in left.EnumerateArray())
                         outcome[Usual(Text(song, "path"))] = ("left_out", "");
             }
-            catch (Exception ex) when (ex is IOException or JsonException or ArgumentException)
+            catch (Exception ex) when (ex is IOException or JsonException or ArgumentException or InvalidOperationException or KeyNotFoundException or FormatException)
             {
                 error = "the result could not be read: " + ex.Message;
             }
@@ -486,53 +621,92 @@ internal sealed class Worker : IDisposable
 
         var counts = new Dictionary<string, int>();
         var titles = new Dictionary<string, string>();
-        bool asked = batch[0].Asked, stopped;
+        bool asked = batch[0].Asked, stopped, cancelled, held;
+        var firstDelays = 0;
+        var dropped = 0;
         lock (_gate)
         {
             stopped = _disposed;
+            held = _paused;                 // paused too late for this run to notice: the songs still waiting stay held
+            cancelled = _cancelling && ReferenceEquals(_run, run);
             if (ReferenceEquals(_run, run))
             {
                 _run = null;
                 _job?.Dispose();
                 _job = null;
+                _cancelling = false;
+                _controlled = false;
+                Quietly(() => File.Delete(ControlFile));
             }
             foreach (var item in batch)
             {
                 var status = outcome.TryGetValue(item.Path, out var o) ? o.Status : "";
                 var title = string.IsNullOrWhiteSpace(o.Title) ? Path.GetFileNameWithoutExtension(item.Path) : o.Title;
-                if (code == ExitAlreadyRunning)
+                if (code == ExitAlreadyRunning && !cancelled)
                 {
                     item.NotBefore = now + TimeSpan.FromMinutes(1); // a run in another window: wait for it
                     continue;
                 }
                 if (stopped) continue; // Noctis is closing: the song stays on the list
-                if (status is "" or "failed" or "not_reached" or "network_error")
+                if (cancelled)
                 {
-                    // Noctis may have been writing to the file, or the run broke off: once more, later
-                    if (++item.Tries < MaxTries)
+                    // A stop by the user says nothing about a song: no failed try, no wait. What was finished
+                    // stays finished (its lyrics are written); everything else is taken off the list below.
+                    if (status is not ("timed" or "lines_only" or "no_lyrics" or "rejected" or "not_timed" or "skipped" or "left_out")) continue;
+                }
+                else
+                {
+                    if (status == "network_error" || (code == ExitSetupFailed && status is "" or "not_reached"))
                     {
-                        item.NotBefore = now + TimeSpan.FromMinutes(2);
+                        // Not the song's fault, and it can last for hours (no internet, a broken setup):
+                        // it keeps its tries and waits longer each time instead of being given up.
+                        if (item.Waits == 0) firstDelays++;
+                        item.NotBefore = now + Backoff(item.Waits++);
                         continue;
                     }
-                    status = status.Length == 0 ? "failed" : status;
+                    if (status is "" or "failed" or "not_reached")
+                    {
+                        // Noctis may have been writing to the file, or the run broke off: once more, later
+                        if (++item.Tries < MaxTries)
+                        {
+                            item.NotBefore = now + TimeSpan.FromMinutes(2);
+                            continue;
+                        }
+                        status = status.Length == 0 ? "failed" : status;
+                    }
                 }
                 _items.Remove(item.Path);
                 counts[status] = counts.GetValueOrDefault(status) + 1;
                 titles[status] = title;
             }
+            if (cancelled && !stopped)
+            {
+                // The songs of this batch that were not reached and all that were still waiting.
+                dropped = _items.Count;
+                _items.Clear();
+            }
             SaveState();
         }
         if (stopped) return;
 
+        if (cancelled)
+        {
+            var finished = counts.Values.Sum();
+            _log($"WordLyrics was cancelled: {finished} finished, {dropped} taken off the waiting list");
+            _progress(new ProgressState("Cancelled", CancelNotice(finished, dropped) + $"\nDetails: {ResultFile}", finished, batch.Count, Finished: true, Report: report));
+            _notify(CancelNotice(finished, dropped));
+            return;
+        }
+
         if (code == ExitAlreadyRunning)
         {
             _log("WordLyrics is running in another window; trying again in a minute");
-            _progress(new ProgressState("Waiting for another WordLyrics run", "Another window is using the model. This batch will retry in a minute.", Total: batch.Count));
+            _progress(new ProgressState("Waiting for another WordLyrics run", "Another window is using the model. This batch will retry in a minute.", Total: batch.Count, Paused: held));
             return;
         }
-        if (code == 70)
+        if (code == ExitSetupFailed)
         {
-            _progress(new ProgressState("Setup is needed", "ENVIRONMENT_REPAIR_FAILED: private packages could not be repaired. Open Set up WordLyrics; the queued songs are saved. Startup log: " + OutputFile, Finished: true, Error: true, Report: report));
+            _progress(new ProgressState("Setup is needed", "ENVIRONMENT_REPAIR_FAILED: private packages could not be repaired. Open Set up WordLyrics; the queued songs are saved and tried again later. Startup log: " + OutputFile, Finished: true, Error: true, Report: report, Paused: held));
             return;
         }
         _log($"WordLyrics finished (exit code {code}): " +
@@ -544,11 +718,75 @@ internal sealed class Worker : IDisposable
         var detail = string.Join("\n", new[] { error, reason, $"Details: {ResultFile}", $"Startup log: {OutputFile}" }.Where(s => s.Length > 0));
         var retrying = counts.Count == 0 && outcome.Count != 0 || (counts.Count == 0 && code != 0);
         _progress(new ProgressState(retrying ? "Retry scheduled" : timed > 0 ? $"{timed} songs received word timestamps" : "No new word timestamps were written",
-            detail + (failed > 0 ? $"\n{failed} songs need attention." : ""), counts.Values.Sum(), batch.Count,
-            Finished: true, Error: failed > 0 || code != 0, Report: report));
+            detail + (failed > 0 ? $"\n{failed} songs need attention." : "") + (held ? "\nPaused: the songs still waiting start when you press Resume." : ""),
+            counts.Values.Sum(), batch.Count, Finished: true, Error: failed > 0 || code != 0, Report: report, Paused: held));
         if (message is not null && (asked || Options.Notify)) _notify(message);
+        // Said when a song first has to wait, not at every later try.
+        if (firstDelays > 0 && (asked || Options.Notify))
+            _notify($"The lyric provider could not be reached. {firstDelays} song{(firstDelays == 1 ? "" : "s")} will be tried again later.");
         _timer.Change(TimeSpan.FromSeconds(1), Tick); // anything else waiting?
     }
+
+    /// <summary>The one notice after Cancel: what was kept, what was dropped, and how to start those songs again.</summary>
+    internal static string CancelNotice(int finished, int dropped)
+    {
+        static string Songs(int n) => n == 1 ? "1 song" : $"{n} songs";
+        var done = finished == 0 ? "" : $" {Songs(finished)} finished before the stop and keep their lyrics.";
+        return dropped == 0
+            ? "WordLyrics stopped." + done + " Nothing else was waiting."
+            : $"WordLyrics stopped.{done} {Songs(dropped)} {(dropped == 1 ? "was" : "were")} taken off the waiting list. " +
+              $"Start {(dropped == 1 ? "it" : "them")} again from the song's right-click menu (Time the words) or from the WordLyrics program.";
+    }
+
+    /// <summary>Tells the progress window how things stand, with pause and cancel added to what the program last said. Called under the lock.</summary>
+    private void Emit()
+    {
+        if (_run is null)
+        {
+            if (_paused)
+                _progress(new ProgressState("Paused", $"{_items.Count} song{(_items.Count == 1 ? " is" : "s are")} waiting. Press Resume to continue.", Paused: true));
+            return;
+        }
+        var view = _view;
+        var message = view.Message;
+        var detail = view.Detail;
+        if (_cancelling)
+        {
+            message = "Stopping WordLyrics";
+            detail = "The song being timed is finished first. Songs that were not reached, and the songs still waiting, are taken off the list.\n" + detail;
+        }
+        else if (_paused)
+        {
+            message = "Paused";
+            detail = (view.EnginePaused ? "WordLyrics is paused. Press Resume to continue." : "Pausing: the step in progress is finishing. Press Resume to continue.") + "\n" + detail;
+        }
+        _progress(new ProgressState(message, detail, view.Completed, view.Total, view.Fraction,
+            Controllable: _controlled, Paused: _paused && !_cancelling, Cancelling: _cancelling));
+    }
+
+    /// <summary>Writes "pause", "run" or "stop" for the program to find. Called under the lock; the file is replaced whole.</summary>
+    private void WriteControl(string word)
+    {
+        try
+        {
+            var temporary = ControlFile + ".tmp";
+            File.WriteAllText(temporary, word, new UTF8Encoding(false));
+            File.Move(temporary, ControlFile, overwrite: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _log("the control file could not be written: " + ex.Message);
+        }
+    }
+
+    /// <summary>How long a song waits after a run that could not do anything: 10 minutes, 30 minutes, an hour, then every 3 hours.</summary>
+    internal static TimeSpan Backoff(int waits) => waits switch
+    {
+        <= 0 => TimeSpan.FromMinutes(10),
+        1 => TimeSpan.FromMinutes(30),
+        2 => TimeSpan.FromHours(1),
+        _ => TimeSpan.FromHours(3),
+    };
 
     /// <summary>One sentence for the notice pill, or null when there is nothing worth saying.</summary>
     private static string? Summary(Dictionary<string, int> counts, Dictionary<string, string> titles, bool asked)
@@ -612,9 +850,18 @@ internal sealed class Worker : IDisposable
                 };
             }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             _log("the list of waiting songs could not be read: " + ex.Message);
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException or FormatException)
+        {
+            // Not in a form this plugin wrote: Noctis must still start. The file is kept for a look
+            // (the next save replaces state.json), and the list starts empty.
+            _items.Clear();
+            try { File.Copy(StateFile, StateFile + ".broken", overwrite: true); }
+            catch (Exception copy) when (copy is IOException or UnauthorizedAccessException) { }
+            _log("the list of waiting songs was not readable (" + ex.Message + "); a copy was kept as state.json.broken and the list starts empty");
         }
     }
 

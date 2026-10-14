@@ -39,6 +39,7 @@ def repair_models(folder,known,download,*,say=lambda _:None,stop=None):
 def permission_error(error):
     current=error
     for _ in range(6):
+        if getattr(current,"winerror",None) in (32,33):return False   # in use / locked by another program: not a permission problem
         if isinstance(current,PermissionError) or getattr(current,"errno",None) in (1,13) or getattr(current,"winerror",None)==5:return True
         current=getattr(current,"__cause__",None) or getattr(current,"__context__",None)
         if current is None:break

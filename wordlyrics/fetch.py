@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -26,6 +27,8 @@ from . import library as L
 API = "https://lrclib.net/api"
 UA = "WordLyrics/%s (local music library tool; cached and throttled)" % __version__
 MIN_INTERVAL = 0.35
+COOLDOWN = 120.0     # a timeout or server error only pauses a provider this long (doubling while it keeps failing)
+HARD_BLOCKS = ("HTTP_401", "HTTP_403", "RATE_LIMIT", "TLS_FAILED")      # these switch a provider off for the whole run
 
 
 class Offline(Exception):
@@ -44,6 +47,8 @@ class Client:
         from .sources import settings
         self.provider_config = settings(config_path) if provider_config is None else dict(provider_config)
         self.provider_disabled = {}
+        self.provider_paused = {}      # name -> (until, message): a short pause after a timeout or server error
+        self.pause_count = {}
         self.source_notes = []
         self.network_failures = {}
         self.recovery_notes = []
@@ -51,12 +56,36 @@ class Client:
     def _cache(self, key):
         return os.path.join(self.cache_dir, hashlib.sha1(key.encode("utf-8")).hexdigest() + ".json")
 
+    def blocked(self, name):
+        """Why a provider is switched off right now, or ''. A block (refused, rate limit, TLS) lasts for the run;
+        a timeout or server error only pauses it for a while, then the next request goes through as a probe."""
+        if name in self.provider_disabled:
+            return self.provider_disabled[name]
+        paused = self.provider_paused.get(name)
+        if paused is None:
+            return ""
+        if time.time() < paused[0]:
+            return paused[1]
+        self.provider_paused.pop(name, None)
+        return ""
+
+    def switch_off(self, name, message, kind):
+        if kind in HARD_BLOCKS:
+            self.provider_disabled[name] = message
+            return
+        self.pause_count[name] = self.pause_count.get(name, 0) + 1
+        self.provider_paused[name] = (time.time() + COOLDOWN * 2 ** min(self.pause_count[name] - 1, 3), message)
+
+    def recovered(self, name):
+        self.pause_count.pop(name, None)
+        self.provider_paused.pop(name, None)
+
     def get(self, endpoint, params, stop=None):
         """-> ('ok', data) | ('notfound', None) | ('error', message). Only ok / notfound are remembered."""
         url = API + endpoint + "?" + urllib.parse.urlencode(sorted(params.items()))
         cp = self._cache(url)
         stale = None
-        if os.path.exists(cp) and not self.refresh:
+        if os.path.exists(cp):           # also when refreshing: an old answer is still the fallback if the service is down
             try:
                 with open(cp,"rb") as file:
                     raw=file.read(2_000_001)
@@ -66,15 +95,16 @@ class Client:
                 if c.get("status")=="ok" and 0<=age<=90*86400:stale=c.get("data")
                 # "not there" is asked again after a month: the database keeps growing
                 lifetime = 7 * 86400 if c["status"] == "ok" else 86400
-                if time.time() - c.get("ts", 0) < lifetime:
+                if not self.refresh and time.time() - c.get("ts", 0) < lifetime:
                     return c["status"], c["data"]
             except Exception:
                 pass
-        if "lrclib.net" in self.provider_disabled:
+        why = self.blocked("lrclib.net")
+        if why:
             if stale is not None:
                 self.recovery_notes.append("CACHE_FALLBACK: using previously downloaded LRCLIB data; recording and timing checks still apply.")
                 return "ok",stale
-            return "error", self.provider_disabled["lrclib.net"]
+            return "error", why
         from .network import explain
         err, kind = "", "CONNECTION_FAILED"
         for attempt in range(2):
@@ -95,6 +125,7 @@ class Client:
                 self._remember(cp, "ok", data)
                 self.interval = max(MIN_INTERVAL, self.interval * 0.9)
                 self.errors_in_a_row = 0
+                self.recovered("lrclib.net")
                 self.network_failures.pop("LRCLIB", None)
                 return "ok", data
             except urllib.error.HTTPError as e:
@@ -102,6 +133,7 @@ class Client:
                 if e.code == 404:
                     self._remember(cp, "notfound", None)
                     self.errors_in_a_row = 0
+                    self.recovered("lrclib.net")
                     self.network_failures.pop("LRCLIB", None)
                     return "notfound", None
                 kind, message = explain(e)
@@ -121,15 +153,15 @@ class Client:
                         return "error", "stopped"
                 else:
                     break
-            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError, http.client.HTTPException) as e:
                 kind, message = explain(e)
                 err = "LRCLIB [%s]: %s" % (kind, message)
                 if stop is not None and stop.wait(1):
                     return "error", "stopped"
         self.errors_in_a_row += 1
         self.network_failures["LRCLIB"] = err
-        if self.errors_in_a_row >= 2 or kind in ("HTTP_401", "HTTP_403", "RATE_LIMIT", "TLS_FAILED"):
-            self.provider_disabled["lrclib.net"] = err
+        if self.errors_in_a_row >= 2 or kind in HARD_BLOCKS:
+            self.switch_off("lrclib.net", err, kind)
         if stale is not None:
             self.recovery_notes.append("CACHE_FALLBACK: using previously downloaded LRCLIB data; recording and timing checks still apply.")
             return "ok",stale
@@ -236,7 +268,7 @@ def judge(song, src_artist, src_title, src_seconds, *, allow_unknown_duration=Fa
     reasons = []
     src_artist = src_artist if isinstance(src_artist, str) else ""
     src_title = src_title if isinstance(src_title, str) else ""
-    best = max(sim(t, src_title) for t in title_variants(song.title))
+    best = max((sim(t, src_title) for t in title_variants(song.title)), default=0.0)   # no title in the file: nothing matches
     if best < 0.92:
         reasons.append("title differs")
     if not artist_ok(song.artist, song.albumartist, src_artist):

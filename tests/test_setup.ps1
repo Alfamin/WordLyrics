@@ -69,7 +69,10 @@ $saved=@{}; foreach($name in $names){$saved[$name]=[Environment]::GetEnvironment
 $passed=0
 function Assert-Setup($condition,$message) { if(-not $condition){throw $message}; $script:passed++ }
 try {
-    foreach($case in @('decline','install','bad-size','bad-hash','network-failure','install-failure','noninteractive','portable','private-defaults','private-kept','private-invalid','local-bundle','older-noctis','newer-program')) {
+    $running=$null
+    if ([Threading.Mutex]::TryOpenExisting('WordLyrics-one-run-at-a-time',[ref]$running)) { $running.Dispose(); throw 'A real WordLyrics run is active on this computer; close it, then run this test again.' }
+    $cases=@('decline','install','bad-size','bad-hash','network-failure','install-failure','noninteractive','portable','private-defaults','private-kept','private-invalid','local-bundle','older-noctis','newer-program','persian-digits','arabic-digits-spaced','persian-decline')
+    foreach($case in $cases) {
         $state=$global:WordLyricsSetupFixture; $state.Case=$case; $state.Starts=0; $state.HashChecks=0
         $state.Requests=[Collections.Generic.List[string]]::new(); $state.Answers=[Collections.Generic.Queue[string]]::new()
         $root=Join-Path $fixtureRoot $case; $state.Root=$root
@@ -97,6 +100,10 @@ try {
             $state.Answers.Enqueue('1')
         }
         elseif($case -eq 'decline'){$state.Answers.Enqueue('0')}
+        # digits typed on a Persian / Arabic keyboard layout, with spaces around them, mean the same numbers
+        elseif($case -eq 'persian-digits'){$state.Answers.Enqueue([string][char]0x06F1)}
+        elseif($case -eq 'arabic-digits-spaced'){$state.Answers.Enqueue(' '+[char]0x0661+' ')}
+        elseif($case -eq 'persian-decline'){$state.Answers.Enqueue([string][char]0x06F0)}
         elseif($case -eq 'portable') {
             $portable=Join-Path $root 'portable\Noctis.exe'; New-Item -ItemType Directory -Force -Path (Split-Path $portable) | Out-Null
             'not executable' | Set-Content -LiteralPath $portable -Encoding ascii
@@ -115,9 +122,9 @@ try {
         $output=(& $Installer 6>&1 | Out-String)
         Assert-Setup (Test-Path -LiteralPath (Join-Path $env:WORDLYRICS_DIR 'wordlyrics\__main__.py')) "$case`: WordLyrics installs even when Noctis fails/is declined"
         Assert-Setup (-not $output.Contains('0123456789abcdef0123456789abcdef') -and -not $output.Contains('secret proxy details')) "$case`: no credentials/proxy details in output"
-        if($case -in @('install','install-failure','local-bundle','older-noctis')){Assert-Setup ($state.Starts -eq 1 -and $state.HashChecks -eq 1) "$case`: verified installer launched once"}
+        if($case -in @('install','install-failure','local-bundle','older-noctis','persian-digits','arabic-digits-spaced')){Assert-Setup ($state.Starts -eq 1 -and $state.HashChecks -eq 1) "$case`: verified installer launched once"}
         else{Assert-Setup ($state.Starts -eq 0) "$case`: no executable launch"}
-        if($case -in @('install','portable','local-bundle','older-noctis') -or $case -like 'private-*') {
+        if($case -in @('install','portable','local-bundle','older-noctis','persian-digits','arabic-digits-spaced') -or $case -like 'private-*') {
             if (-not (Test-Path -LiteralPath (Join-Path $env:APPDATA 'Noctis\plugins\dev.moshi.wordlyrics\plugin.json'))) { Write-Host $output }
             Assert-Setup (Test-Path -LiteralPath (Join-Path $env:APPDATA 'Noctis\plugins\dev.moshi.wordlyrics\plugin.json')) "$case`: plugins installed for detected/new Noctis"
         }
@@ -134,7 +141,7 @@ try {
         }
         Assert-Setup ($state.Answers.Count -eq 0) "$case`: no hidden prompts"
     }
-    "PASS: $passed setup assertions across 14 scenarios; no network, executable/model launch or real credentials."
+    "PASS: $passed setup assertions across $($cases.Count) scenarios; no network, executable/model launch or real credentials."
 } finally {
     foreach($name in $names){[Environment]::SetEnvironmentVariable($name,$saved[$name],'Process')}
     Remove-Variable -Name WordLyricsSetupFixture -Scope Global

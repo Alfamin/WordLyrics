@@ -27,7 +27,7 @@ public sealed class WordLyricsPlugin : INoctisPlugin
     public PluginInfo Info { get; } = new(
         Id: "dev.moshi.wordlyrics",
         Name: "WordLyrics",
-        Version: "1.2.3",
+        Version: "1.2.4",
         Author: "moshi",
         Description: "Word-by-word lyrics for new songs, by themselves: the WordLyrics program finds the lyrics of a song that was added to the library and times every word in the background.");
 
@@ -157,12 +157,13 @@ public sealed class WordLyricsPlugin : INoctisPlugin
         Options options;
         try { options = ReadOptions(_host); }
         catch (Exception) { return; }
+        // Taken over at once, on this thread, so that two quick changes can never land the other way round.
+        worker.Options = options;
         var data = _host.DataDirectory;
         Task.Run(() =>
         {
             try
             {
-                worker.Options = options;
                 var tool = new Tool(options.Folder);
                 if (key == SetupKey)
                 {
@@ -195,12 +196,12 @@ public sealed class WordLyricsPlugin : INoctisPlugin
         if (!_autoShownForJob && _host.Settings.GetBool("showProgress", true))
         {
             _autoShownForJob = true;
-            if (_progress is null) ShowProgress();
+            if (_progress is null) ShowProgress(activate: false); // opened by itself: never takes the keyboard from a game or a document
         }
         _progress?.Update(state);
     });
 
-    private void ShowProgress()
+    private void ShowProgress(bool activate = true)
     {
         if (_host is null) return;
         if (_progress is not null) { _progress.Activate(); return; }
@@ -222,9 +223,13 @@ public sealed class WordLyricsPlugin : INoctisPlugin
         {
             try { new Tool(configuredFolder).OpenResume(path); }
             catch (Exception ex) { Notify("RESUME_OPEN_FAILED: " + ex.GetType().Name + ". Use WordLyrics > 7 Resume / fix unfinished jobs."); }
-        }));
+        }),
+            // Pause and Cancel: Noctis's UI thread only takes note; the control file is written on a thread of our own.
+            paused => Task.Run(() => worker?.SetPaused(paused)),
+            () => Task.Run(() => worker?.Cancel()));
         window.Update(_lastProgress);
         window.Closed += (_, _) => { if (ReferenceEquals(_progress, window)) _progress = null; };
+        window.ShowActivated = activate;
         var owner = (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.MainWindow;
         if (owner is null) window.Show(); else window.Show(owner);
     }

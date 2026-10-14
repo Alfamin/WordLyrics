@@ -8,10 +8,11 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, patch
+import http.client
 import urllib.error
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from wordlyrics import decide, fetch as F, library as L, sources as S
+from wordlyrics import decide, drafts, fetch as F, library as L, network, sources as S
 from wordlyrics.pipeline import Run
 
 PLAIN = "We follow the morning light across the empty city\nWe sing another gentle line beneath the open sky"
@@ -226,6 +227,97 @@ class PipelineTests(unittest.TestCase):
             self.assertIs(judge.call_args.args[0], feat)
             self.assertEqual(lookup.call_args.kwargs["skip"], ["lrclib.net"])
             run._apply.assert_called_once_with(s, success)
+
+
+class UntitledSongTests(unittest.TestCase):
+    def test_a_song_without_a_title_matches_nothing_instead_of_crashing(self):
+        ok, reasons, best, off = F.judge(song(title=""), "Example Artist", "Example Song", 200)
+        self.assertFalse(ok)
+        self.assertIn("title differs", reasons)
+        self.assertEqual(best, 0.0)
+
+    def test_manual_lrclib_search_works_for_an_untagged_song(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(F.Client, "get", return_value=("ok", [lrclib()])):
+            rows = drafts.lrclib_results(d, song(title="", artist=""), "example song")
+        self.assertEqual(len(rows), 1)
+        self.assertIn("title differs", rows[0]["warning"])
+        self.assertFalse(rows[0]["recording_match"])
+
+
+class UnreliableNetworkTests(unittest.TestCase):
+    OK = {"id": 1}
+
+    def response(self):
+        reply = Mock()
+        reply.read.return_value = json.dumps(self.OK).encode()
+        return reply
+
+    def test_cut_short_or_garbled_replies_are_ordinary_network_errors(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = client(d)
+            c.interval = 0
+            for error in (http.client.IncompleteRead(b"partial"), http.client.BadStatusLine("garbage")):
+                with patch("urllib.request.urlopen", side_effect=error):
+                    self.assertEqual(c.get("/get", {"track_name": type(error).__name__})[0], "error")
+        opener = Mock()
+        opener.open.side_effect = http.client.IncompleteRead(b"partial")
+        with tempfile.TemporaryDirectory() as d, patch.object(S.urllib.request, "build_opener", return_value=opener):
+            self.assertEqual(S.request(client(d), "genius", "https://genius.com/api/search/multi")[0], "error")
+        probe = network.probe("LRCLIB", Mock(side_effect=http.client.IncompleteRead(b"")))
+        self.assertEqual((probe["ok"], probe["code"]), (False, "INVALID_RESPONSE"))
+
+    def test_a_timeout_pauses_lrclib_for_a_while_and_then_one_probe_is_allowed(self):
+        slow = urllib.error.URLError(TimeoutError("slow"))
+        with tempfile.TemporaryDirectory() as d, patch.object(F, "time") as clock:
+            clock.time.return_value = 1000.0
+            c = client(d)
+            c.interval = 0
+            with patch("urllib.request.urlopen", side_effect=slow) as open_url:
+                for name in "ab":
+                    self.assertEqual(c.get("/get", {"track_name": name})[0], "error")
+                tried = open_url.call_count
+                self.assertTrue(c.blocked("lrclib.net"))
+                self.assertNotIn("lrclib.net", c.provider_disabled)           # not switched off for the run
+                self.assertEqual(c.get("/get", {"track_name": "c"})[0], "error")
+                self.assertEqual(open_url.call_count, tried)                   # paused: no request was made
+                clock.time.return_value = 1000.0 + F.COOLDOWN + 1
+                self.assertEqual(c.get("/get", {"track_name": "d"})[0], "error")
+                self.assertGreater(open_url.call_count, tried)                 # the probe went out ...
+                self.assertTrue(c.blocked("lrclib.net"))                       # ... failed, so it waits longer this time
+                self.assertGreater(c.provider_paused["lrclib.net"][0], 1000.0 + 2 * F.COOLDOWN)
+            clock.time.return_value = 1000.0 + 10 * F.COOLDOWN
+            with patch("urllib.request.urlopen", return_value=nullcontext(self.response())):
+                self.assertEqual(c.get("/get", {"track_name": "e"}), ("ok", self.OK))
+            self.assertEqual((c.blocked("lrclib.net"), c.pause_count), ("", {}))
+
+    def test_server_errors_pause_genius_but_a_refusal_ends_it_for_the_run(self):
+        for code, permanent in ((503, False), (403, True), (429, True)):
+            opener = Mock()
+            opener.open.side_effect = urllib.error.HTTPError("https://genius.com/api/search/multi", code, "x", {}, None)
+            with tempfile.TemporaryDirectory() as d, patch.object(S.urllib.request, "build_opener", return_value=opener), \
+                    patch.object(F, "time") as clock, patch.object(S, "time", clock):
+                clock.time.return_value = 1000.0
+                c = client(d)
+                self.assertEqual(S.request(c, "genius", "https://genius.com/api/search/multi")[0], "error")
+                self.assertEqual("genius" in c.provider_disabled, permanent)
+                self.assertEqual(S.request(c, "genius", "https://genius.com/api/search/multi")[0], "error")
+                self.assertEqual(opener.open.call_count, 1)
+                clock.time.return_value = 1000.0 + F.COOLDOWN + 1
+                S.request(c, "genius", "https://genius.com/api/search/multi")
+                self.assertEqual(opener.open.call_count, 1 if permanent else 2)
+
+    def test_old_answer_is_still_the_fallback_while_refreshing(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = F.Client(d, provider_config={}, refresh=True)
+            c.interval = 0
+            c._remember(c._cache(F.API + "/get?track_name=example"), "ok", self.OK)
+            with patch("urllib.request.urlopen", side_effect=urllib.error.URLError(TimeoutError("down"))) as open_url:
+                self.assertEqual(c.get("/get", {"track_name": "example"}), ("ok", self.OK))
+            self.assertTrue(open_url.called)                                   # it did try the service first
+            self.assertIn("CACHE_FALLBACK", c.recovery_notes[0])
+            with patch("urllib.request.urlopen", return_value=nullcontext(self.response())) as open_url:
+                c.get("/get", {"track_name": "example"})
+            self.assertTrue(open_url.called)                                   # and a working service still wins
 
 
 if __name__ == "__main__":

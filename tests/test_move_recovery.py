@@ -61,10 +61,26 @@ class MoveRecoveryTests(unittest.TestCase):
         chosen,reason=S.recover(third,self.home)
         self.assertFalse(chosen);self.assertIn("SOURCE_RECOVERY_CONFLICT",reason)
 
-    def test_bad_private_record_is_preserved_and_reported(self):
+    def test_bad_private_record_is_preserved_skipped_and_reported(self):
         record=next((self.home/"source choices").glob('*.json'));record.write_text("invalid")
-        self.assertIn("SOURCE_RECOVERY_INVALID",S.recover(self.audio,self.home)[1])
-        self.assertEqual(record.read_text(),"invalid")
+        S.SKIPPED.clear()
+        self.assertEqual(S.recover(self.audio,self.home),("",""))
+        self.assertEqual(list(S.SKIPPED),[record.name]);self.assertEqual(record.read_text(),"invalid")
+
+    def test_one_damaged_record_does_not_fail_every_other_song(self):
+        copied=self.root/"Copy.flac";shutil.copyfile(self.audio,copied)
+        second=self.root/"Second.flac";second.write_bytes(b"second recording")
+        pin=second.with_suffix(".lyrics-source.txt");pin.write_text("https://genius.com/Other-song-lyrics")
+        S.remember(second,pin,self.home)
+        (self.home/"source choices"/"too-big.json").write_text(" "*9000)
+        pin.write_text("not a genius page")              # its record now points at an invalid choice
+        unrelated=self.root/"Unrelated.flac";unrelated.write_bytes(b"nothing saved for this one")
+        S.SKIPPED.clear()
+        self.assertEqual(S.recover(copied,self.home),(URL,""))      # the good record still works
+        self.assertEqual(S.recover(unrelated,self.home),("",""))    # a lyric-less song is not blocked
+        self.assertEqual(len(S.SKIPPED),2)
+        reason=S.recover(second,self.home)[1]                        # ... but a song's OWN damaged choice is still reported
+        self.assertIn("SOURCE_RECOVERY_INVALID",reason)
 
     def test_invalid_url_and_linked_pins_are_not_remembered(self):
         self.pin.write_text("https://evil.example/song-lyrics")

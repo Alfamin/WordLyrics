@@ -31,7 +31,7 @@
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
     $Repo = 'Alfamin/WordLyrics'
-    $ProgramVersion = '1.6.3'
+    $ProgramVersion = '1.6.4'
     $Sources = @(
         "https://github.com/$Repo/archive/refs/heads/main.zip",
         "https://codeload.github.com/$Repo/zip/refs/heads/main"
@@ -182,6 +182,57 @@
         return ('DOWNLOAD_FAILED (' + $exception.GetType().Name + '): check internet access or your VPN/proxy.')
     }
 
+    # Persian (U+06F0-U+06F9) and Arabic-Indic (U+0660-U+0669) digits count as 0-9, and spaces around an answer are ignored.
+    function ConvertTo-AsciiDigits($text) {
+        $out = New-Object Text.StringBuilder
+        foreach ($ch in ([string]$text).Trim().ToCharArray()) {
+            $code = [int]$ch
+            if ($code -ge 0x06F0 -and $code -le 0x06F9) { [void]$out.Append([char](48 + $code - 0x06F0)) }
+            elseif ($code -ge 0x0660 -and $code -le 0x0669) { [void]$out.Append([char](48 + $code - 0x0660)) }
+            else { [void]$out.Append($ch) }
+        }
+        return $out.ToString()
+    }
+
+    # A download counts only when it opens as a ZIP and holds the file we expect; otherwise the next source is tried.
+    function Test-ZipPackage($path, $wanted) {
+        try {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+            $archive = [IO.Compression.ZipFile]::OpenRead($path)
+            try {
+                foreach ($entry in $archive.Entries) { if (($entry.FullName -replace '\\','/') -match $wanted) { return $true } }
+            } finally { $archive.Dispose() }
+        } catch { }
+        return $false
+    }
+
+    # WordLyrics holds a named mutex while it times songs; its own Python (in the install folder) is the other sign of an open window.
+    function Test-WordLyricsRunning {
+        try {
+            $held = $null
+            if ([Threading.Mutex]::TryOpenExisting('WordLyrics-one-run-at-a-time', [ref]$held)) { $held.Dispose(); return $true }
+        } catch [UnauthorizedAccessException] { return $true } catch { }
+        try {
+            $private = [IO.Path]::GetFullPath($Dest).TrimEnd('\') + '\.python\'
+            foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+                $path = $null
+                try { $path = $process.Path } catch { }
+                if ($path -and $path.StartsWith($private, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+            }
+        } catch { }
+        return $false
+    }
+
+    function Wait-WordLyricsClosed {
+        while (Test-WordLyricsRunning) {
+            Write-Host ' WORDLYRICS_RUNNING: WordLyrics is open or busy (a WordLyrics window, or the Noctis plugin timing songs).' -ForegroundColor Yellow
+            Write-Host ' Close it first, so that program files are not replaced while it is using them.'
+            if ($env:WORDLYRICS_NONINTERACTIVE -eq '1') { throw 'WORDLYRICS_RUNNING: close WordLyrics, then run this line again. Existing files were kept.' }
+            $answer = ConvertTo-AsciiDigits (Read-Host ' WORDLYRICS INPUT | Close it, then press Enter to check again (or 0 to stop)')
+            if ($answer -eq '0') { throw 'WORDLYRICS_RUNNING: stopped at your request. Existing files were kept.' }
+        }
+    }
+
     function Find-Noctis {
         $candidates = @($env:WORDLYRICS_NOCTIS_EXE,
             (Join-Path $env:LOCALAPPDATA 'Programs\Noctis\Noctis.exe'),
@@ -210,7 +261,7 @@
         Write-Host ' Official downloads: https://github.com/heartached/Noctis/releases/latest'
         if ($env:WORDLYRICS_INSTALL_NOCTIS -eq '1') { $choice = '1' }
         elseif ($env:WORDLYRICS_NONINTERACTIVE -eq '1') { $choice = '0' }
-        else { $choice = Read-Host ' WORDLYRICS INPUT | Choose 1, 2 or 0, then Enter' }
+        else { $choice = ConvertTo-AsciiDigits (Read-Host ' WORDLYRICS INPUT | Choose 1, 2 or 0, then Enter') }
         if ($choice -eq '2') {
             $path = (Read-Host ' Drop/type the path to Noctis.exe').Trim().Trim('"')
             if ([IO.Path]::GetFileName($path) -ieq 'Noctis.exe' -and (Test-Path -LiteralPath $path -PathType Leaf)) { return [IO.Path]::GetFullPath($path) }
@@ -356,10 +407,12 @@
             try {
                 Write-Host " Downloading the program from $(([Uri]$u).Host) ..."
                 Invoke-WebRequest -UseBasicParsing -Uri $u -OutFile $Zip -TimeoutSec 120
+                if (-not (Test-ZipPackage $Zip '(^|/)WordLyrics\.bat$')) { throw 'ZIP_INCOMPLETE: the download is damaged or is not the WordLyrics program. Trying the next source.' }
                 $got = $true
                 break
             } catch {
-                Write-Host ('   ' + (Explain-Download $_)) -ForegroundColor Yellow
+                if ($_.Exception.Message -like 'ZIP_*') { Write-Host ('   ' + $_.Exception.Message) -ForegroundColor Yellow }
+                else { Write-Host ('   ' + (Explain-Download $_)) -ForegroundColor Yellow }
             }
         }
         if (-not $got) {
@@ -383,6 +436,7 @@
             if ($keepNewerProgram -and -not $reuseProgram) { Write-Host " WORDLYRICS_NEWER_INSTALLED: keeping $existing; the supplied program is older ($incoming)." -ForegroundColor Yellow }
         } catch { }
 
+        if (-not $keepNewerProgram) { Wait-WordLyricsClosed }
         New-Item -ItemType Directory -Force -Path (Join-Path $Dest 'wordlyrics') | Out-Null
         # the program's own files are replaced by the new ones; models, reports and the portable Python stay
         foreach ($f in 'WordLyrics.bat', 'requirements.txt', 'README.md', 'install.ps1', 'LICENSE.txt', 'lyrics-providers.example.json') {
@@ -431,9 +485,13 @@
                 foreach ($u in $(if ($got -or $env:WORDLYRICS_OFFLINE_INSTALL -eq '1') { @() } else { $x.Urls })) {
                     try {
                         Invoke-WebRequest -UseBasicParsing -Uri $u -OutFile $file -TimeoutSec 120
+                        if (-not (Test-ZipPackage $file '^plugin\.json$')) { throw 'ZIP_INCOMPLETE: the download is damaged or is not a Noctis plugin. Trying the next source.' }
                         $got = $true
                         break
-                    } catch { Write-Host ('   ' + (Explain-Download $_)) -ForegroundColor Yellow }
+                    } catch {
+                        if ($_.Exception.Message -like 'ZIP_*') { Write-Host ('   ' + $_.Exception.Message) -ForegroundColor Yellow }
+                        else { Write-Host ('   ' + (Explain-Download $_)) -ForegroundColor Yellow }
+                    }
                 }
                 if ($got) { $NoctisNotes += Add-ToNoctis $x.Name $file $x.Id }
                 else { $NoctisNotes += " Noctis plugin `"$($x.Name)`": could not be downloaded, left as it is." }

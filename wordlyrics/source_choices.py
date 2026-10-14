@@ -9,6 +9,7 @@ from .sources import genius_song_url
 
 HOME = Path(__file__).resolve().parents[1]
 MAX_AUDIO_HASH = 1_000_000_000
+SKIPPED = {}        # record file name -> why recover() ignored it; the menu says so once after it reads the library
 
 
 def identity(path):
@@ -97,24 +98,33 @@ def recover(audio, home=None):
     if folder.is_symlink():
         return "", "SOURCE_RECOVERY_INVALID: linked source-choice storage was preserved"
     try:
-        paths = list(folder.glob("*.json"))
+        paths = sorted(folder.glob("*.json"))
         if len(paths) > 4096:
-            raise ValueError("too many source-choice records")
+            SKIPPED["*"] = "more than 4096 records; the rest were not checked"
+            paths = paths[:4096]
         current_id, size = identity(audio), os.path.getsize(audio)
         entries = []
+        own_problem = False
         for path in paths:
-            st = path.lstat()
-            if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1 or st.st_size > 8192:
-                raise ValueError("unsafe source-choice record")
-            entry = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(entry, dict) or entry.get("version") != 1 or not isinstance(entry.get("identity"), list):
-                raise ValueError("invalid source-choice record")
+            entry = None
             try:
-                source, pin_hash = read_pin(entry["pin"])
-            except FileNotFoundError:
-                continue
-            if pin_hash == entry.get("pin_hash") and source == entry.get("source"):
-                entries.append(entry)
+                st = path.lstat()
+                if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1 or st.st_size > 8192:
+                    raise ValueError("unsafe source-choice record")
+                entry = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(entry, dict) or entry.get("version") != 1 or not isinstance(entry.get("identity"), list):
+                    raise ValueError("invalid source-choice record")
+                try:
+                    source, pin_hash = read_pin(entry["pin"])
+                except FileNotFoundError:
+                    continue
+                if pin_hash == entry.get("pin_hash") and source == entry.get("source"):
+                    entries.append(entry)
+            except (OSError, ValueError, KeyError, TypeError, UnicodeError) as error:
+                # one damaged record must not stop every other song: leave it where it is, skip it, say so once
+                SKIPPED[path.name] = type(error).__name__
+                if isinstance(entry, dict) and entry.get("identity") == current_id:
+                    own_problem = True       # ... unless it is this very recording's own choice
         matches = [entry for entry in entries if entry["identity"] == current_id]
         if not matches:
             candidates = [entry for entry in entries if entry.get("size") == size and entry.get("sha256")]
@@ -124,6 +134,8 @@ def recover(audio, home=None):
         sources = {entry["source"] for entry in matches}
         if len(sources) > 1:
             return "", "SOURCE_RECOVERY_CONFLICT: this recording has conflicting saved sources; choose its source again"
+        if not sources and own_problem:
+            raise ValueError("this recording's saved source record is damaged")
         return (sources.pop(), "") if sources else ("", "")
     except (OSError, ValueError, KeyError, TypeError, UnicodeError):
         return "", "SOURCE_RECOVERY_INVALID: saved source recovery needs inspection; choose this song's source again"

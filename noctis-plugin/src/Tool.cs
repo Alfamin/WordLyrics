@@ -25,26 +25,33 @@ internal sealed class Tool
 
     public bool Installed => File.Exists(Bat);
 
-    /// <summary>The first WordLyrics that can be given single songs and reports what it did with them.</summary>
-    private static readonly Version Needed = new(1, 6, 3);
+    /// <summary>The first WordLyrics that can be given single songs, reports what it did with them and
+    /// can be paused and stopped from the progress window (--control).</summary>
+    private static readonly Version Needed = new(1, 6, 4);
 
-    /// <summary>Installed, but from before it could be handed single songs.</summary>
-    public bool TooOld
+    /// <summary>The first WordLyrics that understands --control. Today the same as <see cref="Needed"/>.</summary>
+    private static readonly Version ControlNeeded = new(1, 6, 4);
+
+    /// <summary>The installed program's version, or null when it cannot be told.</summary>
+    private Version? ProgramVersion()
     {
-        get
+        try
         {
-            try
-            {
-                var about = File.ReadAllText(Path.Combine(Folder, "wordlyrics", "__init__.py"));
-                var match = System.Text.RegularExpressions.Regex.Match(about, "__version__\\s*=\\s*\"(\\d+\\.\\d+\\.\\d+)");
-                return !match.Success || Version.Parse(match.Groups[1].Value) < Needed;
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                return true;
-            }
+            var about = File.ReadAllText(Path.Combine(Folder, "wordlyrics", "__init__.py"));
+            var match = System.Text.RegularExpressions.Regex.Match(about, "__version__\\s*=\\s*\"(\\d+\\.\\d+\\.\\d+)");
+            return match.Success ? Version.Parse(match.Groups[1].Value) : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
         }
     }
+
+    /// <summary>Installed, but from before it could do what this plugin needs.</summary>
+    public bool TooOld => ProgramVersion() is not { } version || version < Needed;
+
+    /// <summary>Can this program be paused and stopped through a control file? Without it the buttons stay hidden.</summary>
+    public bool SupportsControl => ProgramVersion() is { } version && version >= ControlNeeded;
 
     /// <summary>Installed, new enough, its own Python set up and both models fetched: a run starts without downloading anything.</summary>
     public bool Ready
@@ -70,8 +77,9 @@ internal sealed class Tool
     /// <summary>
     /// Times the songs listed in <paramref name="listFile"/>, without a window. What happened to
     /// each song is written to <paramref name="resultFile"/>, the program's own output to <paramref name="logFile"/>.
+    /// With <paramref name="controlFile"/> the program looks at that small file twice a second: "pause", "run" or "stop".
     /// </summary>
-    public Process StartQuietRun(string root, string listFile, string resultFile, string logFile, string speed, string backup, bool retry, string? progressFile = null)
+    public Process StartQuietRun(string root, string listFile, string resultFile, string logFile, string speed, string backup, bool retry, string? progressFile = null, string? controlFile = null)
     {
         // Pass paths as real arguments. cmd.exe expands %variables% even inside quotes.
         var python = Environment.GetEnvironmentVariable("WORDLYRICS_PYTHON");
@@ -87,6 +95,7 @@ internal sealed class Tool
             "--yes", "--no-open", "--plain-output", "--speed", speed }) info.ArgumentList.Add(arg);
         if (retry) info.ArgumentList.Add("--retry");
         if (progressFile is not null) { info.ArgumentList.Add("--progress"); info.ArgumentList.Add(progressFile); }
+        if (controlFile is not null) { info.ArgumentList.Add("--control"); info.ArgumentList.Add(controlFile); }
         backup = backup.Trim().Trim('"');
         if (backup.Length > 0) { info.ArgumentList.Add("--backup-to"); info.ArgumentList.Add(Environment.ExpandEnvironmentVariables(backup)); }
         info.Environment["WORDLYRICS_HOME"] = Folder;
@@ -104,6 +113,10 @@ internal sealed class Tool
         var process = new Process { StartInfo = info };
         process.OutputDataReceived += Log; process.ErrorDataReceived += Log;
         if (!process.Start()) { process.Dispose(); throw new InvalidOperationException("WordLyrics could not be started."); }
+        // The background work must never compete with the music for the processor; what the
+        // program starts in turn inherits this. Not worth failing over when Windows refuses.
+        try { process.PriorityClass = ProcessPriorityClass.BelowNormal; }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException) { }
         process.BeginOutputReadLine(); process.BeginErrorReadLine();
         return process;
     }

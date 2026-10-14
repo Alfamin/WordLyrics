@@ -81,6 +81,7 @@ def parser():
                                                            "the music folder); only they and their lyric files go into the backup copy")
     ap.add_argument("--result", metavar="FILE", help="also write what happened to each song into this file (JSON), for other programs")
     ap.add_argument("--progress", metavar="FILE", help="write live progress for the Noctis plugin")
+    ap.add_argument("--control", metavar="FILE", help=argparse.SUPPRESS)      # Pause / Cancel from the Noctis plugin (control.py)
     ap.add_argument("--backup-to", metavar="FOLDER", help="where the backup copy goes (default: the drive with the most free space)")
     ap.add_argument("--yes", action="store_true", help="do not ask anything, use the defaults")
     ap.add_argument("--dry-run", action="store_true", help="only look at the folder and say what would be done; nothing is copied or written")
@@ -170,8 +171,15 @@ def do_undo(args):
     if not a.yes and ask("Type yes to move them: ").lower() != "yes":
         print("Nothing was moved.")
         return 0
-    dest, done = undo.apply(lib_home, move)
+    dest, done, failed = undo.apply(lib_home, move)
     print("%d files moved to %s" % (done, dest))
+    if failed:
+        print("%d could not be moved and were left where they are:" % len(failed))
+        for rel, why in failed[:20]:
+            print("  %s: %s" % (rel, why))
+        if len(failed) > 20:
+            print("  ...")
+        return 4
     return 0
 
 
@@ -298,14 +306,16 @@ def _main(argv=None):
             print("Choose one song from Noctis or WordLyrics > Search / fix a song.");return 2
         from .menu import Menu
         session=Menu(HOME,[],main)
-        session.repair_path(argv[1],lyrics_file=argv[3] if len(argv)==4 else None)
+        try:session.repair_path(argv[1],lyrics_file=argv[3] if len(argv)==4 else None)
+        except KeyboardInterrupt:print("\nStopped by you (Ctrl+C). Back at the main menu.")
         return session.run()  # Back returns to a parent menu; only explicit Exit ends the session
     if argv[:1]==["resume"]:
         if len(argv)!=2:
             print("Choose a saved job in WordLyrics > Resume / fix unfinished jobs.");return 2
         from .menu import Menu
         session=Menu(HOME,[],main)
-        session.resume_job(argv[1])
+        try:session.resume_job(argv[1])
+        except KeyboardInterrupt:print("\nStopped by you (Ctrl+C). Back at the main menu.")
         return session.run()
     if argv[:1] == ["check"]:
         if already_running():
@@ -442,6 +452,10 @@ def _main(argv=None):
     from .progress import Writer
     progress = Writer(opts.progress, run)
     run.screen.on_update = progress.write
+    control = None
+    if opts.control:                                         # started by the Noctis plugin: Pause / Cancel
+        from .control import Control
+        control = Control(opts.control, run, changed=lambda: progress.write(force=True)).start()
     keep_awake(True)
     code, error = 0, ""
     try:
@@ -452,14 +466,22 @@ def _main(argv=None):
         code, error = 130, "stopped"
         print("\nStopped.")
     except Stop as e:
-        code, error = 1, str(e) or "stopped"
-        print("\n" + (str(e) or "Stopped."))
+        if run.user_stop:                                    # Cancel in the plugin window ends like Ctrl+C
+            code, error = 130, "stopped"
+            print("\nStopped.")
+        else:
+            code, error = 1, str(e) or "stopped"
+            print("\n" + (str(e) or "Stopped."))
     except backup.BackupError as e:
-        code, error = 1, "the backup could not be completed: %s" % e
-        print("\nThe backup could not be completed, so nothing else was done: %s" % e)
-        print("Nothing was written to your music folder.")
-        from .recovery import permission_error
-        if permission_error(e):error="PERMISSION_DENIED: "+error
+        if run.user_stop:
+            code, error = 130, "stopped"
+            print("\nStopped.")
+        else:
+            code, error = 1, "the backup could not be completed: %s" % e
+            print("\nThe backup could not be completed, so nothing else was done: %s" % e)
+            print("Nothing was written to your music folder.")
+            from .recovery import permission_error
+            if permission_error(e):error="PERMISSION_DENIED: "+error
     except Exception as e:
         code, error = 1, "%s: %s" % (type(e).__name__, e)
         run.problems.append("the run ended with an error: %s: %s" % (type(e).__name__, e))
@@ -470,6 +492,8 @@ def _main(argv=None):
             run.permission_targets.append(getattr(e,"filename",None) or source)
     finally:
         keep_awake(False)
+        if control is not None:
+            control.close()
     if run.songs:
         try:
             path = report.write(run)

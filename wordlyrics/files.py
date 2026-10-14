@@ -3,6 +3,7 @@ import os
 import hashlib
 import stat
 import tempfile
+import time
 
 
 def _same_file(path, identity):
@@ -13,9 +14,21 @@ def _same_file(path, identity):
         return False
 
 
+def _retry(action):
+    """Windows: antivirus, the search indexer or a music player may hold a just-written file for a moment
+    (sharing violation, winerror 32/33). Try again a few times, shortly apart, before giving up."""
+    for pause in (0.1, 0.2, 0.3, None):
+        try:
+            return action()
+        except OSError as e:
+            if pause is None or getattr(e, "winerror", None) not in (32, 33):
+                raise
+            time.sleep(pause)
+
+
 def _publish(staging, target):
     if os.name == "nt":
-        os.rename(staging, target)   # Windows rename refuses an existing destination, atomically.
+        _retry(lambda: os.rename(staging, target))   # Windows rename refuses an existing destination, atomically.
     else:
         os.link(staging, target)     # POSIX rename can overwrite: a new hard link is exclusive instead.
 
@@ -84,7 +97,7 @@ def replace_backed_up(path,data,backup,expected):
             raise OSError("The replacement lyric file did not verify")
         if os.path.islink(target) or sha256(target)!=expected or sha256(saved)!=expected:
             raise OSError("Lyrics changed during the rerun; the existing file was preserved")
-        os.replace(staging,target)
+        _retry(lambda: os.replace(staging,target))
     finally:
         if identity is not None and _same_file(staging,identity):
             os.unlink(staging)

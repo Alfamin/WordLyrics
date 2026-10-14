@@ -181,13 +181,29 @@ def _is_junction(path):
         return False
 
 
+def _utf16_without_mark(raw):
+    """"utf-16-le" / "utf-16-be" when bytes without a byte-order mark are clearly UTF-16, else "".
+    Only strong evidence counts: UTF-16 of Latin text, digits and spaces has a NUL in every second byte,
+    while text in an old code page (cp1252, cp1256, ...) has no NUL bytes at all."""
+    pairs = len(raw) // 2
+    if pairs < 4 or len(raw) % 2:
+        return ""
+    even, odd = raw[0::2].count(0), raw[1::2].count(0)
+    if odd >= 0.1 * pairs and even <= 0.02 * pairs:
+        return "utf-16-le"
+    if even >= 0.1 * pairs and odd <= 0.02 * pairs:
+        return "utf-16-be"
+    return ""
+
+
 def _read_text(path):
     try:
         with open(path, "rb") as fh:
             raw = fh.read(4 * 1024 * 1024)
     except OSError:
         return ""
-    for enc in ("utf-8-sig", "utf-16"):
+    guess = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else _utf16_without_mark(raw)
+    for enc in ([guess] if guess else []) + ["utf-8-sig"]:
         try:
             return raw.decode(enc)
         except UnicodeError:

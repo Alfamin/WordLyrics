@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 import shlex
 import shutil
+import time
+import traceback
 import urllib.parse
 import uuid
 import webbrowser
@@ -17,6 +19,11 @@ from .ui import duration, _enable_ansi
 
 DIGITS=str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩،","01234567890123456789,")
 FAILURES={"no_lyrics","network_error","not_timed","rejected","failed","not_reached","lines_only"}
+EXIT_MESSAGES={
+    2:"The run did not start: WordLyrics refused a setting, most often the backup folder (it must not be inside the music folder). Check Advanced > 5 Speed / offline / backup settings. Nothing was changed.",
+    3:"Another WordLyrics run is using the AI model right now (for example the Noctis plugin timing new songs). Wait until it finishes, then try again. Nothing was changed.",
+    130:"Stopped by you. Songs that were already finished are kept; choose 7 Resume / fix unfinished jobs to do the rest.",
+}
 
 
 def selection(text,count):
@@ -71,6 +78,8 @@ class Menu:
         self.scan_unreadable={}
         self.last_job_code=0
         self.last_notice=""
+        self.unread=False       # an action printed something the next screen redraw would wipe: wait for Enter first
+        self.away=None          # the (folders, library) the user chose while a one-off repair/resume borrows one folder
         self.color=writer is None and _enable_ansi() and not os.environ.get("NO_COLOR")
         try:
             data=json.loads(self.preferences.read_text(encoding="utf-8"))
@@ -112,8 +121,43 @@ class Menu:
             more=[p for p in found if not any(backup.inside(p,selected) for selected in self.selected_roots)]
             if more:self.folder_notes.append("Noctis has %d other folder%s. Choose 4 to include them." % (len(more),"" if len(more)==1 else "s"))
 
+    def settle(self):
+        """Redrawing wipes the screen: let the user finish reading what the last action printed."""
+        if not self.unread:return
+        self.unread=False
+        try:self.read("\n  Press Enter to go back to the menu > ")
+        except (EOFError,KeyboardInterrupt):pass
+
+    def command(self,args):
+        """A check / setup / undo screen of its own: its output stays until the user has read it."""
+        code=self.execute(args)
+        self.unread=True
+        return code
+
+    def fault(self,error):
+        """An unexpected error ends that one action, never the menu: one plain line here, the details in menu-errors.log."""
+        self.last_notice="That step stopped unexpectedly (%s: %s). Nothing was forced; choose another option." % (type(error).__name__,str(error)[:120])
+        self.say(self.last_notice)
+        self.unread=True
+        try:
+            log=self.home/"menu-errors.log"
+            if not log.is_symlink() and (not log.exists() or log.stat().st_size<1_000_000):
+                with log.open("a",encoding="utf-8") as f:f.write(time.strftime("%Y-%m-%d %H:%M:%S")+"\n"+"".join(traceback.format_exception(error))+"\n")
+        except OSError:pass
+
+    def borrow(self,root):
+        """A one-off repair or resume works inside one folder; the folders the user chose come back afterwards and are what is saved."""
+        if self.away is None:self.away=(list(self.selected_roots),self.state["library"])
+        self.selected_roots=[root];self.state["library"]=root
+
+    def release(self):
+        if self.away is not None:
+            self.selected_roots,self.state["library"]=self.away;self.away=None
+
     def panel(self,title,body="",fresh=False):
-        if fresh and self.color:self.say("\033[2J\033[H")
+        if fresh and self.color:
+            self.settle()
+            self.say("\033[2J\033[H")
         line="─"*min(68,max(36,shutil.get_terminal_size((80,24)).columns-4))
         heading="\n%s\n  %s\n%s" % (line,title,line)
         self.say(("\033[1;36m"+heading+"\033[0m") if self.color else heading)
@@ -131,8 +175,9 @@ class Menu:
     def save(self):
         self.home.mkdir(parents=True,exist_ok=True)
         temp=self.home/(".menu-settings-"+uuid.uuid4().hex+".tmp")
+        roots,library=self.away if self.away else (self.selected_roots,self.state["library"])
         with temp.open("x",encoding="utf-8") as f:
-            json.dump(dict(self.state,libraries=self.selected_roots),f)
+            json.dump(dict(self.state,library=library,libraries=roots),f)
         os.replace(temp,self.preferences)
 
     def choose_folders(self):
@@ -153,17 +198,18 @@ class Menu:
                     indices=selection(raw,len(found)+1)
                     if 0 in indices:raise ValueError("Use 1 alone for all folders.")
                     chosen=[found[i-1] for i in indices]
-                except (ValueError,IndexError):self.say("Choose the displayed folder numbers.");return []
+                except (ValueError,IndexError):self.say("Choose the displayed folder numbers.");self.unread=True;return []
                 if not chosen:return []
         else:chosen=[]
         if not chosen:
             raw=self.ask("Drop/type a music folder path (0 back): ",numbers=False).strip('"')
             if raw=="0":return []
             path,error=folders.usable(raw)
-            if error:self.say(error);return []
+            if error:self.say(error);self.unread=True;return []
             chosen=[path]
         self.selected_roots=folders.unique(chosen)
         self.state["library"]=self.selected_roots[0]
+        self.away=None
         self.catalog=None
         self.origin={}
         self.save()
@@ -230,15 +276,23 @@ class Menu:
                 if permission_error(e):s.result["preflight_error"]="PERMISSION_DENIED: access is needed before this song can be checked"
                 else:s.skip="unreadable ("+type(e).__name__+")"
                 return s
+        from . import source_choices
+        source_choices.SKIPPED.clear()
         with ThreadPoolExecutor(4) as pool:
             results=[]
             pending=[pool.submit(read,item) for item in audio]
-            for n,future in enumerate(as_completed(pending),1):
-                results.append(future.result())
-                if n%50==0 or n==len(audio):self.say("  Reading names/status: %d / %d" % (n,len(audio)))
+            try:
+                for n,future in enumerate(as_completed(pending),1):
+                    results.append(future.result())
+                    if n%50==0 or n==len(audio):self.say("  Reading names/status: %d / %d" % (n,len(audio)))
+            except KeyboardInterrupt:
+                for future in pending:future.cancel()   # Ctrl+C must not wait for the whole library to be read
+                raise
             self.catalog=sorted(results,key=lambda s:s.rel.casefold())
         L.group_same_name(self.catalog)
         self.say("\nFound %d songs across %d folder%s." % (len(self.catalog),len(roots),"" if len(roots)==1 else "s"))
+        if source_choices.SKIPPED:
+            self.say("%d saved source-choice record%s could not be used and %s skipped (the files were left as they are). Choose the source again for any song that matters." % (len(source_choices.SKIPPED),"" if len(source_choices.SKIPPED)==1 else "s","was" if len(source_choices.SKIPPED)==1 else "were"))
         return self.catalog
 
     def status(self,s):
@@ -416,14 +470,15 @@ class Menu:
         known=self.selected_roots+folders.discover()[0]
         matching=[root for root in known if backup.inside(path,root)]
         root=max(matching,key=len) if matching else os.path.dirname(path)
-        self.selected_roots=[root];self.state["library"]=root;self.origin[path]=root
+        self.borrow(root);self.origin[path]=root
         try:
             song=L.read_song(path,os.path.relpath(path,root),os.path.getsize(path),redo=True,repair_lyrics=True,ignore_source=True)
             self.panel("WRONG LYRICS / REPAIR THIS SONG", ((song.artist+" - ") if song.artist else "")+(song.title or song.name)+"\n"+path)
             if lyrics_file:self.job([song],redo=True,lyrics_file=lyrics_file,mode_hint="current",repair_lyrics=True,automatic=False)
             else:self.song_actions([song])
             return self.last_job_code
-        except (OSError,ValueError) as e:self.last_notice=str(e);self.panel("SONG NEEDS ATTENTION",str(e));return 1
+        except (OSError,ValueError) as e:self.last_notice=str(e);self.panel("SONG NEEDS ATTENTION",str(e));self.unread=True;return 1
+        finally:self.release()   # the folders the user chose stay as they were
 
     def history(self):
         result={}
@@ -447,9 +502,9 @@ class Menu:
                                retime_mode="fresh" if repair_lyrics else "current",repair_lyrics=repair_lyrics,
                                ignore_source=repair_lyrics and automatic) for s in songs]
         for song in songs:
-            if song.skip:self.say("%s: %s" % (song.rel,song.skip))
+            if song.skip:self.say("%s: %s" % (song.rel,song.skip));self.unread=True
         songs=[s for s in songs if not s.skip]
-        if not songs:self.panel("NOTHING TO START", "No eligible songs selected. Use Songs to see skip reasons, or Advanced > Rerun to replace protected .elrc timing.");return
+        if not songs:self.panel("NOTHING TO START", "No eligible songs selected. Use Songs to see skip reasons, or Advanced > Rerun to replace protected .elrc timing.");self.unread=True;return
         repair_paths=set()
         if not redo:
             damaged=[s for s in songs if s.retime_path and s.previous_tier!=L.WORD]
@@ -460,7 +515,7 @@ class Menu:
                 if choice=="1":repair_paths={s.path for s in damaged}
                 elif choice=="2":songs=[s for s in songs if s not in damaged]
                 else:return
-                if not songs:self.say("No other songs need processing. Existing files were left alone.");return
+                if not songs:self.say("No other songs need processing. Existing files were left alone.");self.unread=True;return
         mode="current"
         if redo and mode_hint is not None:
             mode=mode_hint
@@ -507,12 +562,14 @@ class Menu:
             if repair_lyrics:args.append("--repair-lyrics")
             if repair_lyrics and automatic:args.append("--ignore-lyric-source")
             code=self.execute(args)
+            self.unread=True        # the result and its hints must outlive the next redraw
             self.last_job_code=code or self.last_job_code
             try:
                 data=json.loads(result.read_text(encoding="utf-8"))
                 summary=data["summary"]
                 self.panel("RESULT", summary["message"])
                 self.last_notice=summary["message"]
+                if code==130:self.last_notice="Stopped by you. "+self.last_notice
                 first_problem=next((item.get("reason") for item in data.get("songs",[]) if item.get("reason") and item.get("status") in FAILURES),"")
                 if first_problem:self.last_notice += "\n    Reason: "+first_problem.split(". ")[0]
                 total_timed += summary["timed"]
@@ -524,8 +581,12 @@ class Menu:
                 self.say("Report: "+str(report_path))
                 if repair_lyrics and summary["timed"]:self.say("In Noctis, select another song and return to this song to reload its new lyrics.")
             except (OSError,ValueError,KeyError,TypeError):
-                self.last_notice="Run returned status %s without a result summary. Success has not been confirmed; read its report." % code
-                self.panel("RESULT", "The run returned status %s. No result summary was available; read the messages above. Success has not been confirmed." % code)
+                if code in EXIT_MESSAGES:
+                    self.last_notice=EXIT_MESSAGES[code]
+                    self.panel("RESULT", EXIT_MESSAGES[code])
+                else:
+                    self.last_notice="Run returned status %s without a result summary. Success has not been confirmed; read its report." % code
+                    self.panel("RESULT", "The run returned status %s. No result summary was available; read the messages above. Success has not been confirmed." % code)
                 if code:total_attention += len(paths)
             if code==130:break
         if len(groups)>1:self.panel("ALL SELECTED FOLDERS", "%d songs received word timestamps; %d need attention." % (total_timed,total_attention))
@@ -625,20 +686,20 @@ class Menu:
                         try:rerun.restore(str(self.home),root,rows[i]);self.say("Restored: "+rows[i]["rel"])
                         except OSError as e:self.say(str(e))
             except ValueError as e:self.say(str(e))
-            self.catalog=None
+            self.catalog=None;self.unread=True
         elif pick=="4":
             from . import repair
             rows=repair.records(str(self.home),root)
             for i,row in enumerate(rows,1):self.say("%d  %s" % (i,row["rel"]))
-            if not rows:self.say("No archived preferred lyric files to restore.");return
+            if not rows:self.say("No archived preferred lyric files to restore.");self.unread=True;return
             chosen=selection(self.ask("File numbers to restore (0 back): "),len(rows))
             if chosen and self.ask("Restore these old lyrics? 1 Yes   0 Cancel: ")=="1":
                 for i in chosen:
                     repair.restore(root,rows[i]);self.say("Restored: "+rows[i]["rel"])
-            self.catalog=None
+            self.catalog=None;self.unread=True
         elif pick=="3":
             self.say("This archives unmodified additions made by WordLyrics. Retimed originals use Restore previous timing.")
-            if self.ask("1 Continue   0 Cancel: ")=="1":self.execute(["undo",root,"--yes"])
+            if self.ask("1 Continue   0 Cancel: ")=="1":self.command(["undo",root,"--yes"])
             self.catalog=None
 
     def settings(self):
@@ -654,7 +715,7 @@ class Menu:
         elif pick=="4":
             choice=self.ask("1 Online lookup   2 Offline (existing words only)   0 Back: ")
             if choice in ("1","2"):self.state["offline"]=choice=="2"
-        elif pick=="5":self.execute(["providers"])
+        elif pick=="5":self.command(["providers"])
         self.save()
 
     def advanced(self):
@@ -665,15 +726,19 @@ class Menu:
         elif pick=="3":self.job(self.scan(),redo=True,whole=True)
         elif pick=="4":self.reports()
         elif pick=="5":self.settings()
-        elif pick in ("6","7","8"):self.execute([{ "6":"check","7":"setup","8":"diagnose"}[pick]])
+        elif pick in ("6","7","8"):self.command([{ "6":"check","7":"setup","8":"diagnose"}[pick]])
 
     def resume_job(self,run_dir):
+        try:return self.resume_loop(run_dir)
+        finally:self.release()   # the folders the user chose stay as they were
+
+    def resume_loop(self,run_dir):
         code=0
         while True:
             try:data,rows=resume.pending(str(self.home),run_dir)
-            except (OSError,ValueError) as e:self.panel("SAVED JOB NEEDS ATTENTION",str(e));return 1
-            if not rows:self.panel("THIS JOB IS COMPLETE", "No unfinished songs remain. Completed word timestamps were kept.");return 0
-            self.selected_roots=[data["source"]];self.state["library"]=data["source"]
+            except (OSError,ValueError) as e:self.panel("SAVED JOB NEEDS ATTENTION",str(e));self.unread=True;return 1
+            if not rows:self.panel("THIS JOB IS COMPLETE", "No unfinished songs remain. Completed word timestamps were kept.");self.unread=True;return 0
+            self.borrow(data["source"])
             folders_waiting=sum(bool(row.get("folder")) for row in rows)
             self.panel("NEEDS ACTION - YOUR PROGRESS IS SAVED", "%d unfinished songs; %d folders still need scanning. Completed songs will not be processed again." % (len(rows)-folders_waiting,folders_waiting))
             for row in rows[:8]:self.say("  %s: %s" % (Path(row["path"]).name,row["reason"]))
@@ -761,12 +826,18 @@ class Menu:
                     if selected:self.job(selected,redo=True,mode_hint="fresh")
                 elif pick=="4":self.choose_folders()
                 elif pick=="5":self.advanced()
-                elif pick=="6":self.execute(["diagnose"])
+                elif pick=="6":self.command(["diagnose"])
                 elif pick=="7":self.unfinished()
                 elif pick=="8":self.song_actions(self.search_songs())
                 elif any(c.isalpha() for c in pick):self.song_actions(self.search_songs(query=pick))
+            except KeyboardInterrupt:
+                self.say("\nStopped by you (Ctrl+C). Back at the main menu.")
+                self.last_notice="Stopped by you (Ctrl+C)."
             except (OSError,ValueError) as e:
                 self.say("Nothing unsafe was forced: "+str(e))
+                self.unread=True
+            except Exception as e:
+                self.fault(e)
 
 
 def run_menu(home,initial,executor,reader=None,writer=None,options=None):

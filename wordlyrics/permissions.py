@@ -41,7 +41,8 @@ def repair(home,source,paths,launch=None,detailed=False):
     if os.name!="nt":return answer(False,"Permission repair requires Windows. Ask the folder owner to grant access.")
     system=Path(os.environ.get("SystemRoot","C:\\Windows"))/"System32"
     shell=str(system/"WindowsPowerShell"/"v1.0"/"powershell.exe")
-    sid=subprocess.check_output([str(system/"whoami.exe"),"/user","/fo","csv","/nh"],text=True,encoding="utf-8",errors="replace").strip().split(',')[-1].strip('" ')
+    try:sid=subprocess.check_output([str(system/"whoami.exe"),"/user","/fo","csv","/nh"],text=True,encoding="utf-8",errors="replace").strip().split(',')[-1].strip('" ')
+    except (subprocess.CalledProcessError,OSError):sid=""  # reported below as an unknown user, never as a traceback
     import re
     if not re.fullmatch(r"(?:S-1-5-21-(?:\d+-){2}\d+-\d+|S-1-12-1(?:-\d+){4})",sid):raise ValueError("CURRENT_USER_UNKNOWN: unable to identify the requesting Windows user.")
     area=Path(home)/"permission-repairs"/uuid.uuid4().hex;area.mkdir(parents=True)

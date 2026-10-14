@@ -37,6 +37,23 @@ def library_home(home, source):
     return os.path.join(home, "runs", "%s-%s" % ("".join(c if c.isalnum() or c in " -_" else "_" for c in name), tag))
 
 
+def save_json(path, data):
+    """Write a small state file so that it is always the old or the new content, never half of one."""
+    tmp = path + ".part"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=0)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def file_bytes(text):
     """Lyric files are written as UTF-8 with Windows line ends, no byte-order mark."""
     return (text.rstrip("\n").replace("\n", "\r\n") + "\r\n").encode("utf-8")
@@ -66,6 +83,7 @@ class Run:
         self.fetch_done = threading.Event()
         self.problems = []
         self.interrupted = False
+        self.user_stop = False             # stopped from the Noctis window (control.py), which ends like Ctrl+C
         self.exclude = [home]              # the tool's own folder, should it sit inside the music folder
         self.queued_n = 0                  # songs handed to the listener so far
         self.queued_audio = 0.0            # ... and their length in seconds
@@ -125,6 +143,12 @@ class Run:
             self.set_speed({"1": "full", "2": "half", "3": "light"}[ch], pause=False)
         elif ch == "p":
             self.set_speed(pause=not self.paused)
+
+    def request_stop(self):
+        """Stop the way Ctrl+C does: the song being timed is finished, then the folder is checked and the report written."""
+        self.user_stop = True
+        self.interrupted = True
+        self.stop.set()
 
     def enqueue(self, ready, song):
         old = self.remembered.get(song.rel)
@@ -336,6 +360,7 @@ class Run:
                 from .engine import Engine
                 self.engine = Engine(models_dir, "auto", os.path.join(self.home, "speed test.json"), self.screen.say)
                 self.engine.stop = self.stop
+                self.engine.changed = self.engine_event
                 self.screen.fact("Runs on", self.engine.describe())
                 self.set_speed()
             except Exception as e:
@@ -348,6 +373,7 @@ class Run:
                     if not repaired:raise e
                     self.engine=Engine(models_dir,"cpu",None,self.screen.say)
                     self.engine.stop=self.stop
+                    self.engine.changed=self.engine_event
                     self.screen.fact("Runs on",self.engine.describe()+" (repaired model files)")
                     self.set_speed()
                 except Exception as failure:self.engine_error=failure
@@ -355,6 +381,14 @@ class Run:
         self.engine_loader=t
         t.start()
         return t
+
+    def engine_event(self, note):
+        """A model moved between the graphics card and the processor: keep the "Runs on" line true and, once,
+        keep a note for the report."""
+        if self.engine is not None:
+            self.screen.fact("Runs on", self.engine.describe())
+        if note and note not in self.problems:
+            self.problems.append(note)
 
     # ------------------------------------------------------------------ finding lyrics
     def fetcher(self, stage, todo, ready):
@@ -384,11 +418,11 @@ class Run:
                     return
                 stage.now = s.rel
                 found, note = fetch.lookup(client, s, self.stop)
-                for provider, issue in client.network_failures.items():
+                for provider, issue in list(client.network_failures.items()):     # apply() may change it meanwhile
                     if issue not in self.problems:
                         self.problems.append(issue)
                         self.screen.say(issue)
-                for recovery_note in getattr(client,"recovery_notes",[]):
+                for recovery_note in list(getattr(client,"recovery_notes",[])):
                     if recovery_note not in self.problems:
                         self.problems.append(recovery_note);self.screen.say(recovery_note)
                 s.found, s.fetch_note = found, note
@@ -430,33 +464,35 @@ class Run:
                 except queue.Full:
                     continue
             return False
-        while not self.stop.is_set():
-            try:
-                song = ready.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            if song is None:
-                break
-            try:
-                mix, stereo = audio.load(song.path)
-            except audio.Unusable as e:
-                put(("fail", song, str(e)))
-                continue
-            except Exception as e:
-                put(("fail", song, "the audio could not be read (%s)" % type(e).__name__))
-                continue
-            if not put(("song", song, mix, stereo.shape[1])):
-                return
-            try:
-                for spec in S.spec_batches(stereo):
-                    if not put(("spec", spec)):
-                        return
-            except MemoryError:
-                put(("abort", "not enough memory for this song"))
-                continue
-            del stereo
-            put(("end",))
-        put(None)
+        try:
+            while not self.stop.is_set():
+                try:
+                    song = ready.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                if song is None:
+                    break
+                try:
+                    mix, stereo = audio.load(song.path)
+                except audio.Unusable as e:
+                    put(("fail", song, str(e)))
+                    continue
+                except Exception as e:
+                    put(("fail", song, "the audio could not be read (%s)" % type(e).__name__))
+                    continue
+                if not put(("song", song, mix, stereo.shape[1])):
+                    return
+                try:
+                    for spec in S.spec_batches(stereo):
+                        if not put(("spec", spec)):
+                            return
+                except Exception as e:                # whatever goes wrong: this song fails, the next one is still tried
+                    put(("abort", "not enough memory for this song" if isinstance(e, MemoryError)
+                         else "the audio could not be prepared (%s)" % type(e).__name__))
+                del stereo
+                put(("end",))
+        finally:
+            put(None)                                 # the listener must never wait for a helper that has ended
 
     def listen(self, stage, ready, total_hint):
         """Main thread: the models. Everything else (reading files, the maths before and after the models,
@@ -479,56 +515,69 @@ class Run:
             stage.left = rate.left(max(self.queued_audio - state["audio"], 0.0)) if total_n > done_n else None
             stage.note = "waiting for lyrics to be found" if total_n <= done_n and not self.fetch_done.is_set() else ""
 
-        while True:
-            if self.stop.is_set():
-                break
-            try:
-                item = work.get(timeout=0.5)
-            except queue.Empty:
-                progress()
-                continue
-            if item is None:
-                break
-            kind = item[0]
-            if kind == "fail":
-                _, song, why = item
-                self.record(song, status="failed", reason=why)
-                self.count("failed")
-                state["songs"] += 1
-                state["audio"] += song.seconds or 200.0
-            elif kind == "song":
-                _, song, mix, n44 = item
-                cur = {"song": song, "mix": mix, "n": n44, "parts": [], "t0": time.time(), "bad": None}
-                stage.now = song.rel
-            elif kind == "abort" and cur:
-                cur["bad"] = item[1]
-            elif kind == "spec" and cur and not cur["bad"]:
+        finished = False
+        try:
+            while True:
+                if self.stop.is_set():
+                    break
                 try:
-                    res = self.engine.separate(item[1])
-                    cur["parts"].append(pool.submit(S.back, res))
-                except Exception as e:
-                    cur["bad"] = "the models failed on this song (%s)" % type(e).__name__
-            elif kind == "end" and cur:
-                song = cur["song"]
-                try:
-                    if cur["bad"]:
-                        raise RuntimeError(cur["bad"])
-                    voc = audio.to_mono_16k(S.join([p.result() for p in cur["parts"]], cur["n"]))
-                    feat = self.engine.hear(cur["mix"], voc)
-                    song.result["listen_s"] = round(time.time() - cur["t0"], 1)
-                    self.finish_song(song, feat)
-                except Exception as e:
-                    self.record(song, status="failed", reason=str(e) if cur["bad"] else "the models failed on this song (%s)" % type(e).__name__)
+                    item = work.get(timeout=0.5)
+                except queue.Empty:
+                    progress()
+                    if not prod.is_alive() and work.empty():   # the helper ended without its closing None: do not wait for it
+                        break
+                    continue
+                if item is None:
+                    break
+                kind = item[0]
+                if kind == "fail":
+                    _, song, why = item
+                    self.record(song, status="failed", reason=why)
                     self.count("failed")
-                state["audio"] += song.seconds or 200.0
-                state["songs"] += 1
-                rate.add(state["audio"])
-                cur = None
-            progress()
-        stage.now = "finishing the last songs"
-        stage.left, stage.note = None, ""
-        self.timer.shutdown(wait=True, cancel_futures=self.stop.is_set())
-        pool.shutdown(wait=False)
+                    state["songs"] += 1
+                    state["audio"] += song.seconds or 200.0
+                elif kind == "song":
+                    _, song, mix, n44 = item
+                    cur = {"song": song, "mix": mix, "n": n44, "parts": [], "t0": time.time(), "bad": None}
+                    stage.now = song.rel
+                elif kind == "abort" and cur:
+                    cur["bad"] = item[1]
+                elif kind == "spec" and cur and not cur["bad"]:
+                    try:
+                        res = self.engine.separate(item[1])
+                        cur["parts"].append(pool.submit(S.back, res))
+                    except Exception as e:
+                        cur["bad"] = "the models failed on this song (%s)" % type(e).__name__
+                elif kind == "end" and cur:
+                    song = cur["song"]
+                    try:
+                        if cur["bad"]:
+                            raise RuntimeError(cur["bad"])
+                        voc = audio.to_mono_16k(S.join([p.result() for p in cur["parts"]], cur["n"]))
+                        feat = self.engine.hear(cur["mix"], voc)
+                        song.result["listen_s"] = round(time.time() - cur["t0"], 1)
+                        self.finish_song(song, feat)
+                    except Exception as e:
+                        # a failure of the models or of memory says nothing about the song: not remembered as "do not try again"
+                        self.record(song, status="failed", remembered=True,
+                                    reason=str(e) if cur["bad"] else "the models failed on this song (%s)" % type(e).__name__)
+                        self.count("failed")
+                    state["audio"] += song.seconds or 200.0
+                    state["songs"] += 1
+                    rate.add(state["audio"])
+                    cur = None
+                progress()
+            finished = True
+            stage.now = "finishing the last songs"
+            stage.left, stage.note = None, ""
+        finally:
+            # Always, also after Ctrl+C or an error: nothing may still be timed or written once this returns, because
+            # the final check and the report come next. A normal end waits for every queued song; an early end
+            # waits for the song being timed and drops the ones queued behind it.
+            if not finished:
+                self.stop.set()
+            self.timer.shutdown(wait=True, cancel_futures=self.stop.is_set())
+            pool.shutdown(wait=True, cancel_futures=True)
         stage.done, stage.total = state["songs"], max(state["songs"], 1)
         stage.count = "%d songs" % state["songs"]
         if self.stop.is_set():
@@ -632,7 +681,9 @@ class Run:
         except Exception as e:
             if self.stop.is_set():
                 return                                         # stopped by the user: the song counts as not reached
-            self.record(song, status="failed", reason="unexpected error while timing (%s: %s)" % (type(e).__name__, str(e)[:80]))
+            # the song is fine (a bug, or the helper process broke): not remembered as "do not try again"
+            self.record(song, status="failed", remembered=True,
+                        reason="unexpected error while timing (%s: %s)" % (type(e).__name__, str(e)[:80]))
             self.count("failed")
 
     def _apply(self, song, res):
@@ -655,8 +706,12 @@ class Run:
                 return
             files = [".elrc"]
             if (info["lyrics"] == "found" or info["mode"] == "plain") and not song.has_lrc and not self.opts.no_lrc:
-                if self.put_file(song, ".lrc", T.line_level(elrc), "line-timed lyrics"):
-                    files.append(".lrc")
+                try:
+                    if self.put_file(song, ".lrc", T.line_level(elrc), "line-timed lyrics"):
+                        files.append(".lrc")
+                except OSError as e:                  # the word-timed file is in place and fine; only the plain copy is missing
+                    info["timing_note"] = (song.timing_note + " " if song.timing_note else "") + \
+                        "The line-timed .lrc copy could not be written (%s)." % (e.strerror or str(e)[:100] or type(e).__name__)
             self.record(song, files=files, **info)
             self.count("timed")
             return
@@ -839,8 +894,7 @@ class Run:
                 elif st == "timed":
                     self.remembered.pop(s.rel, None)
             try:
-                with open(memo, "w", encoding="utf-8") as fh:
-                    json.dump(self.remembered, fh, ensure_ascii=False, indent=0)
+                save_json(memo, self.remembered)
             except OSError:
                 pass
         return self

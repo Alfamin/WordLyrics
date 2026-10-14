@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from html.parser import HTMLParser
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -107,8 +108,9 @@ def request(client, provider, url, params=None, *, text=False, stop=None):
             return cached["status"], cached["data"]
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    if provider in client.provider_disabled:
-        return cached_fallback() or ("error",client.provider_disabled[provider])
+    why = client.blocked(provider)
+    if why:
+        return cached_fallback() or ("error",why)
     with client.lock:
         delay = max(0.0, .5 - (time.time() - client.last))
         if delay and (stop.wait(delay) if stop is not None else _wait(delay)):
@@ -124,28 +126,30 @@ def request(client, provider, url, params=None, *, text=False, stop=None):
                 return "error", "provider response is too large"
             data = raw.decode("utf-8", "replace") if text else json.loads(raw)
         client._remember(path, "ok", data)
+        client.recovered(provider)
         getattr(client, "network_failures", {}).pop("Genius", None)
         return "ok", data
     except urllib.error.HTTPError as e:
         e.close()
         if e.code == 404:
             client._remember(path, "notfound", None)
+            client.recovered(provider)
             return "notfound", None
         if e.code in (401, 403, 429):
             from .network import explain
             code, message = explain(e)
             reason = "Genius [%s]: %s" % (code, message)
-            client.provider_disabled[provider] = reason
+            client.switch_off(provider, reason, code)
             getattr(client, "network_failures", {})["Genius"] = reason
             return cached_fallback() or ("error", reason)
         from .network import explain
         code, message = explain(e)
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, http.client.HTTPException) as e:
         from .network import explain
         code, message = explain(e)
     reason = "Genius [%s]: %s" % (code, message)
     getattr(client, "network_failures", {})["Genius"] = reason
-    client.provider_disabled[provider] = reason
+    client.switch_off(provider, reason, code)      # a timeout or server error only pauses Genius for a while
     return cached_fallback() or ("error", reason)
 
 

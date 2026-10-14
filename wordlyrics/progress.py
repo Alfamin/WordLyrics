@@ -1,16 +1,22 @@
 """Small atomic status file for Noctis. Contains song names and reasons, never lyric text."""
 import json
 import os
+import threading
 import time
 
 
 class Writer:
     def __init__(self, path, run):
         self.path, self.run, self.last = path, run, 0.0
+        self._lock = threading.Lock()      # the screen's thread and the control file's thread both write
 
-    def write(self, screen=None, *, final=False, error=""):
-        if not self.path or (not final and time.monotonic() - self.last < .8):
+    def write(self, screen=None, *, final=False, error="", force=False):
+        if not self.path or (not final and not force and time.monotonic() - self.last < .8):
             return
+        with self._lock:
+            self._write(final, error)
+
+    def _write(self, final, error):
         self.last = time.monotonic()
         run = self.run
         stages = [{"name": s.name, "state": s.state, "done": s.done, "total": s.total,
@@ -25,7 +31,8 @@ class Writer:
         data = {"schema": 1, "updated": time.time(), "pid": os.getpid(), "finished": final,
                 "error": error, "total": len(run.songs) or len(run.only_songs or []),
                 "completed": completed, "counts": counts, "stages": stages,
-                "notice": run.screen.notice, "report": os.path.join(run.run_dir, "report.html")}
+                "notice": run.screen.notice, "report": os.path.join(run.run_dir, "report.html"),
+                "paused": bool(getattr(run, "paused", False))}
         try:
             if os.path.islink(self.path) or os.path.islink(self.path + ".tmp"):
                 return

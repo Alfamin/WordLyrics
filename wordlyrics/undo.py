@@ -50,21 +50,30 @@ def plan(home, source):
 
 
 def apply(lib_home, move):
+    """-> (folder the files went to, how many were moved, [(rel, why)] that could not be moved).
+    A file that cannot be moved (in use, read-only, already there) never stops the others."""
     dest = os.path.join(lib_home, "undone " + datetime.now().strftime("%Y-%m-%d %H.%M.%S.%f"))
-    done = 0
+    done, failed = 0, []
     for path, rel in move:
-        target = _usual_form(_long_form(os.path.join(dest, rel)))
-        os.makedirs(os.path.dirname(target), exist_ok=True)
         try:
-            os.replace(path, target)
-        except OSError:                      # other drive: copy, check, then take the original away
-            with open(path, "rb") as f:
-                data = f.read()
-            with open(target, "xb") as f:
-                f.write(data)
-            with open(target, "rb") as f:
-                if f.read() != data:
-                    continue
-            os.remove(path)
+            target = _usual_form(_long_form(os.path.join(dest, rel)))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            try:
+                os.replace(path, target)
+            except OSError:                  # other drive: copy, check, then take the original away
+                with open(path, "rb") as f:
+                    data = f.read()
+                with open(target, "xb") as f:
+                    f.write(data)
+                with open(target, "rb") as f:
+                    if f.read() != data:
+                        raise OSError("the copy did not read back the same; the original was left in place")
+                try:
+                    os.remove(path)
+                except OSError as e:
+                    raise OSError("copied to the undo folder, but the original could not be removed (%s)" % (e.strerror or "in use"))
+        except OSError as e:
+            failed.append((rel, e.strerror or str(e) or type(e).__name__))
+            continue
         done += 1
-    return dest, done
+    return dest, done, failed

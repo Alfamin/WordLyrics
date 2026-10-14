@@ -1,5 +1,6 @@
 """Safe, precise connectivity diagnoses. Never include URLs, query text, or responses in errors."""
 from concurrent.futures import ThreadPoolExecutor
+import http.client
 import socket
 import ssl
 import urllib.error
@@ -23,7 +24,7 @@ def explain(error):
         return "TIMEOUT", "The connection timed out. The provider may be blocked or temporarily unavailable."
     if isinstance(reason, ssl.SSLError):
         return "TLS_FAILED", "A secure connection could not be verified. Check your clock, certificates, or connection."
-    if isinstance(reason, (ValueError, UnicodeError)):
+    if isinstance(reason, (ValueError, UnicodeError, http.client.HTTPException)):
         return "INVALID_RESPONSE", "The provider sent an unreadable response. A network filter or provider change may be involved."
     return "CONNECTION_FAILED", "The connection failed. Check internet access, your VPN, or proxy."
 
@@ -49,7 +50,7 @@ def probe(name, opener=None):
         if e.code == 404:
             return {"provider": name, "ok": True, "code": "REACHABLE", "message": "Connection works; this test query had no result."}
         code, message = explain(e)
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
         code, message = explain(e)
     return {"provider": name, "ok": False, "code": code, "message": message}
 

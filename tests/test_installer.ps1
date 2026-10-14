@@ -29,7 +29,7 @@ $source = Join-Path $script:testRoot 'source\WordLyrics-main'
 New-Item -ItemType Directory -Path (Join-Path $source 'wordlyrics'),(Join-Path $source 'noctis-plugin') | Out-Null
 '@echo off' | Set-Content -LiteralPath (Join-Path $source 'WordLyrics.bat') -Encoding ascii
 'fixture app' | Set-Content -LiteralPath (Join-Path $source 'wordlyrics\__main__.py') -Encoding utf8
-'__version__ = "1.6.3"' | Set-Content -LiteralPath (Join-Path $source 'wordlyrics\__init__.py') -Encoding ascii
+'__version__ = "1.6.4"' | Set-Content -LiteralPath (Join-Path $source 'wordlyrics\__init__.py') -Encoding ascii
 'fixture requirements' | Set-Content -LiteralPath (Join-Path $source 'requirements.txt') -Encoding ascii
 foreach ($name in @('runner','menu','repair','drafts','search')) { 'fixture module' | Set-Content -LiteralPath (Join-Path $source ('wordlyrics\'+$name+'.py')) -Encoding ascii }
 '{}' | Set-Content -LiteralPath (Join-Path $source 'lyrics-providers.example.json') -Encoding ascii
@@ -39,7 +39,7 @@ $script:appPackage = Join-Path $script:testRoot 'app.zip'
 Compress-Archive -LiteralPath $source -DestinationPath $script:appPackage
 $global:WordLyricsInstallerFixtureState = [pscustomobject]@{
     AppPackage=$script:appPackage; Motion=$script:motion; Finder=$script:finder; Shuffle=$script:shuffle
-    Wrong=$script:wrong; Missing=$script:missing; RealPackage=$TrueShufflePackage; Case=''; Urls=$null
+    Wrong=$script:wrong; Missing=$script:missing; RealPackage=$TrueShufflePackage; Case=''; Urls=$null; Answers=$null
 }
 
 function Invoke-WebRequest {
@@ -52,9 +52,14 @@ function Invoke-WebRequest {
         @{ id=$id;version=$version } | ConvertTo-Json | Set-Content -LiteralPath $OutFile -Encoding utf8
         return
     }
+    if ($fixtureState.Case -eq 'corrupt-first-source' -and ([string]$Uri).StartsWith('https://github.com/Alfamin/WordLyrics/archive/')) {
+        'this is not a zip file' | Set-Content -LiteralPath $OutFile -Encoding ascii
+        return
+    }
     $package = switch -Regex ([string]$Uri) {
         'fixture.invalid/wordlyrics' { $fixtureState.AppPackage; break }
         'Alfamin/WordLyrics/archive/' { $fixtureState.AppPackage; break }
+        'codeload.github.com/Alfamin/WordLyrics/' { $fixtureState.AppPackage; break }
         'Alfamin/LyricMotion/' { $fixtureState.Motion; break }
         'Alfamin/noctic-download-plugin/' { $fixtureState.Finder; break }
         'Alfamin/TrueShuffle/' {
@@ -70,13 +75,24 @@ function Invoke-WebRequest {
     Copy-Item -LiteralPath $package -Destination $OutFile
 }
 function Start-Process { throw 'Unexpected process launch in installer tests; no process was started' }
+function Read-Host {
+    param($Prompt)
+    $fixtureState = $global:WordLyricsInstallerFixtureState
+    if (-not $fixtureState.Answers -or $fixtureState.Answers.Count -eq 0) { throw 'Unexpected input prompt' }
+    $answer = $fixtureState.Answers.Dequeue()
+    if ($answer -is [scriptblock]) { return (& $answer) }
+    return $answer
+}
 
-$names = @('WORDLYRICS_SOURCE','WORDLYRICS_DIR','WORDLYRICS_NO_START','WORDLYRICS_SHORTCUT_DIR','NOCTIS_DATA_DIR','WORDLYRICS_NO_EXTRAS','WORDLYRICS_NO_NOCTIS','WORDLYRICS_PACKAGE','WORDLYRICS_FINDER_PACKAGE','WORDLYRICS_EXTRAS_DIR','WORDLYRICS_TELEGRAM_DEFAULTS_FILE','WORDLYRICS_OFFLINE_INSTALL','WORDLYRICS_REPAIR_INSTALL')
+$names = @('WORDLYRICS_SOURCE','WORDLYRICS_DIR','WORDLYRICS_NO_START','WORDLYRICS_SHORTCUT_DIR','NOCTIS_DATA_DIR','WORDLYRICS_NO_EXTRAS','WORDLYRICS_NO_NOCTIS','WORDLYRICS_PACKAGE','WORDLYRICS_FINDER_PACKAGE','WORDLYRICS_EXTRAS_DIR','WORDLYRICS_TELEGRAM_DEFAULTS_FILE','WORDLYRICS_OFFLINE_INSTALL','WORDLYRICS_REPAIR_INSTALL','WORDLYRICS_NONINTERACTIVE')
 $saved = @{}; foreach ($name in $names) { $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 try {
+    $real = $null
+    if ([Threading.Mutex]::TryOpenExisting('WordLyrics-one-run-at-a-time', [ref]$real)) { $real.Dispose(); throw 'A real WordLyrics run is active on this computer; close it, then run this test again.' }
+    $env:WORDLYRICS_NONINTERACTIVE=$null
     $env:WORDLYRICS_PACKAGE=$null; $env:WORDLYRICS_FINDER_PACKAGE=$null; $env:WORDLYRICS_EXTRAS_DIR=$null; $env:WORDLYRICS_TELEGRAM_DEFAULTS_FILE=$null
     $env:WORDLYRICS_OFFLINE_INSTALL=$null; $env:WORDLYRICS_REPAIR_INSTALL=$null
-    $scenarios = @('fresh','same','upgrade','newer','download-failure','wrong-package','missing-entry','no-extras','no-noctis','fallback','reuse-online','reuse-offline','reuse-offline-check','repair-missing-core','repair-missing-plugin','repair-missing-dependency','force-repair')
+    $scenarios = @('fresh','same','upgrade','newer','download-failure','wrong-package','missing-entry','no-extras','no-noctis','fallback','reuse-online','reuse-offline','reuse-offline-check','repair-missing-core','repair-missing-plugin','repair-missing-dependency','force-repair','corrupt-first-source')
     if ($TrueShufflePackage) { $scenarios += 'real-package' }
     foreach ($scenario in $scenarios) {
         $script:case = $scenario; $script:urls = [Collections.Generic.List[string]]::new()
@@ -101,7 +117,7 @@ try {
             @{ id = 'dev.moshi.trueshuffle'; version = $oldVersion; entry = 'Fixture.dll' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $shuffleHome 'plugin.json') -Encoding utf8
             'original plugin' | Set-Content -LiteralPath (Join-Path $shuffleHome 'Fixture.dll') -Encoding ascii
         }
-        $env:WORDLYRICS_SOURCE = 'https://fixture.invalid/wordlyrics.zip'; $env:WORDLYRICS_DIR = $dest
+        $env:WORDLYRICS_SOURCE = if ($scenario -eq 'corrupt-first-source') { $null } else { 'https://fixture.invalid/wordlyrics.zip' }; $env:WORDLYRICS_DIR = $dest
         $env:WORDLYRICS_NO_START = '1'; $env:WORDLYRICS_SHORTCUT_DIR = $desk; $env:NOCTIS_DATA_DIR = $data
         $env:WORDLYRICS_NO_EXTRAS = if ($scenario -eq 'no-extras') { '1' } else { $null }
         $env:WORDLYRICS_NO_NOCTIS = if ($scenario -eq 'no-noctis') { '1' } else { $null }
@@ -134,7 +150,7 @@ try {
             Assert-True ($manifest.version -eq '1.1.0' -and $manifest.entry -eq 'TrueShuffle.dll') 'actual package manifest installed'
             $compiled = Join-Path (Split-Path $TrueShufflePackage) 'TrueShuffle.dll'
             Assert-True ((Get-FileHash -LiteralPath (Join-Path $shuffleHome 'TrueShuffle.dll')).Hash -eq (Get-FileHash -LiteralPath $compiled).Hash) 'actual compiled DLL installed byte-identically'
-        } elseif ($scenario -in @('fresh','upgrade','fallback','reuse-online','reuse-offline','reuse-offline-check','repair-missing-core','repair-missing-plugin','repair-missing-dependency','force-repair')) {
+        } elseif ($scenario -in @('fresh','upgrade','fallback','reuse-online','reuse-offline','reuse-offline-check','repair-missing-core','repair-missing-plugin','repair-missing-dependency','force-repair','corrupt-first-source')) {
             $manifest = Get-Content -LiteralPath (Join-Path $shuffleHome 'plugin.json') -Raw | ConvertFrom-Json
             Assert-True ($manifest.version -eq '1.1.0') "${scenario}: correct shuffle version"
             Assert-True ((Get-Content -LiteralPath (Join-Path $shuffleHome 'Fixture.dll') -Raw).Contains('fixture plugin 1.1.0')) "${scenario}: new DLL installed"
@@ -146,7 +162,33 @@ try {
         }
         if ($scenario -in @('no-extras','no-noctis')) { Assert-True (-not ($script:urls | Where-Object { $_ -match 'TrueShuffle|LyricMotion|noctic-download-plugin' })) "${scenario}: optional sources never contacted" }
         if ($scenario -eq 'fallback') { Assert-True ($script:urls.Contains('https://raw.githubusercontent.com/Alfamin/TrueShuffle/main/dist/TrueShuffle-for-Noctis.zip')) 'raw fallback requested' }
+        if ($scenario -eq 'corrupt-first-source') {
+            Assert-True ($output.Contains('ZIP_INCOMPLETE')) 'a damaged program download is reported'
+            Assert-True ($script:urls.Contains('https://codeload.github.com/Alfamin/WordLyrics/zip/refs/heads/main')) 'a damaged first source falls through to the next one'
+        }
     }
+    # An open WordLyrics (its named mutex) must keep the installer from replacing program files.
+    $folder = Join-Path $script:testRoot 'running'
+    $dest = Join-Path $folder 'WordLyrics'; $main = Join-Path $dest 'wordlyrics\__main__.py'
+    New-Item -ItemType Directory -Path (Join-Path $dest 'wordlyrics'),(Join-Path $folder 'Desktop'),(Join-Path $folder 'Noctis') | Out-Null
+    'old program' | Set-Content -LiteralPath $main -Encoding ascii
+    $env:WORDLYRICS_SOURCE = 'https://fixture.invalid/wordlyrics.zip'; $env:WORDLYRICS_DIR = $dest; $env:WORDLYRICS_NO_START = '1'
+    $env:WORDLYRICS_SHORTCUT_DIR = Join-Path $folder 'Desktop'; $env:NOCTIS_DATA_DIR = Join-Path $folder 'Noctis'; $env:WORDLYRICS_NO_EXTRAS = '1'; $env:WORDLYRICS_NO_NOCTIS = $null
+    $global:WordLyricsInstallerFixtureState.Case = 'running'; $global:WordLyricsInstallerFixtureState.Urls = [Collections.Generic.List[string]]::new()
+    $busy = New-Object Threading.Mutex($false, 'WordLyrics-one-run-at-a-time')
+    try {
+        $env:WORDLYRICS_NONINTERACTIVE = '1'
+        $output = (& $Installer 6>&1 | Out-String)
+        Assert-True ($output.Contains('WORDLYRICS_RUNNING')) 'an open WordLyrics is detected'
+        Assert-True ((Get-Content -LiteralPath $main -Raw).Trim() -eq 'old program') 'program files are not replaced while WordLyrics is open (unattended)'
+        $env:WORDLYRICS_NONINTERACTIVE = $null
+        $global:WordLyricsInstallerFixtureState.Answers = [Collections.Generic.Queue[object]]::new(); $global:WordLyricsInstallerFixtureState.Answers.Enqueue([string][char]0x06F0)
+        $output = (& $Installer 6>&1 | Out-String)
+        Assert-True ($output.Contains('stopped at your request') -and (Get-Content -LiteralPath $main -Raw).Trim() -eq 'old program') 'answering 0 (also as a Persian digit) stops without changes'
+        $global:WordLyricsInstallerFixtureState.Answers.Enqueue({ $busy.Dispose(); '' })
+        $output = (& $Installer 6>&1 | Out-String)
+    } finally { $busy.Dispose() }
+    Assert-True ((Get-Content -LiteralPath $main -Raw).Contains('fixture app') -and $global:WordLyricsInstallerFixtureState.Answers.Count -eq 0) 'closing WordLyrics lets the update continue'
     "PASS: $script:passed installer assertions across $($scenarios.Count) scenarios; no network, real Noctis or model launch."
 } finally {
     foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name,$saved[$name],'Process') }
