@@ -11,7 +11,9 @@ CHUNK = HOP * (DIM_T - 1)
 TRIM = N_FFT // 2
 GEN = CHUNK - 2 * TRIM
 WIN = np.hanning(N_FFT + 1)[:-1].astype(np.float32)
-BATCH = 4
+# One piece per model call. Four at once was measured (1.6.4, DirectML) to hold about 7 GB more memory for
+# the same speed per piece; on an 8 GB graphics card that spills into the computer's memory and crawls.
+BATCH = 1
 
 
 def _stft(w):  # w: [b, 2, CHUNK] -> [b, 4, DIM_F, DIM_T]

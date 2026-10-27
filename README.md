@@ -1,6 +1,10 @@
 # WordLyrics
 
-Version 1.6.4 is a reliability release: a graphics-card error no longer leaves the rest of a run on the
+Version 1.6.5 uses far less memory: the voice model now works on one piece of the song at a time.
+Four pieces at once held about 7 GB more for the same speed; on an 8 GB graphics card that spilled
+into the computer's memory and a song could take minutes or never finish. Results are unchanged.
+
+Version 1.6.4 was a reliability release: a graphics-card error no longer leaves the rest of a run on the
 processor, a short network outage only pauses a lyric source for a few minutes, Ctrl+C always ends
 cleanly, a file briefly held by another program is retried, and menu results stay on screen until
 you press Enter. The Noctis plugin's progress window can now Pause, Resume and Cancel a run
