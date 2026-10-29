@@ -34,6 +34,14 @@ BAND = (0.35, 0.8)
 LOOSER_FWD = (2.5, 6.0, 15.0)   # tried in turn when the words do not fit inside the normal guide
 GAP_JOIN = 0.20     # a silence shorter than this between two words of a line is not shown as a pause
 SNAP_MIN, SNAP_MAX = 0.02, 0.08   # a start may snap this far back to the moment the voice comes in
+# A line's first word starts where the isolated voice rises, up to LINE_RISE_MAX before the model's start, and its last
+# word ends LAST_END_ADD later (never into the next line). Measured against lrc.red's word timing on 47 of the owner's
+# songs (#197, tuned on 32, checked on 15 others): lines starting >0.15 s late 15.0% -> 11.6%, words within 0.1 s
+# 78.5% -> 79.2%, lines ending >0.15 s early 17.5% -> 14.9%. Wider reaches made lines start early; holding the last
+# note longer and spreading unsure words did not help.
+LINE_RISE_MAX = 0.10
+RISE_SHARE = 0.5      # the voice has risen above this share of the quiet threshold
+LAST_END_ADD = 0.05
 BORROW_MAX = 0.05   # a word boundary may be moved by at most this much to keep a short word visible
 MIN_LINE_SHARE = 0.5   # lines the model cannot hear stay ordinary lines at their own stamp, so a song is still
                        # worth writing when a good part of it is word-timed; below half it is left as it was
@@ -309,6 +317,14 @@ def _snap(t, lo, on):
     return t
 
 
+def _rise(t, lo, vr, th, spf):
+    """Back from t while the isolated voice is still above th, not before lo: where the line's voice rose."""
+    k = int(t / spf)
+    while k - 1 >= 0 and (k - 1) * spf >= lo and vr[k - 1] >= th:
+        k -= 1
+    return min(t, k * spf)
+
+
 def keep_visible(starts, ends, letters):
     """A word that would be on screen too briefly to see borrows time from the word before or after it.
     Only boundaries between two words that touch are moved, and never by more than BORROW_MAX."""
@@ -368,6 +384,8 @@ def render(rows, spf, duration, vr=None, thr=None, on=None, smooth=True, band=BA
                 continue
             t = x[0] * spf
             t = _snap(t, (prev + 0.02) if prev is not None else max(floor, t - SNAP_MAX), on)
+            if prev is None and vr is not None:    # the line's first word: from where its voice rose
+                t = _rise(t, max(floor + 0.02, t - LINE_RISE_MAX), vr, thr * RISE_SHARE, spf)
             t = t if prev is None else max(t, prev)
             starts.append(t)
             prev = t
@@ -403,6 +421,8 @@ def render(rows, spf, duration, vr=None, thr=None, on=None, smooth=True, band=BA
                                 quiet = 0            # breath or echo hovering at the threshold is not a held note
                         k += 1
                 e = ef * spf
+                if wi + 1 == len(words):
+                    e += LAST_END_ADD
             e = min(max(e, s + 0.02), max(limit, s))
             voice_ends.append(e)
             if wi + 1 < len(words) and limit - e < GAP_JOIN:

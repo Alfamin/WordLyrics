@@ -266,4 +266,18 @@ class WorkflowModes(unittest.TestCase):
                     self.assertEqual(Path(args[args.index('--songs-from')+1]).read_text().splitlines(),[str(audio)])
 
 
+class LineStartsAndEnds(unittest.TestCase):
+    """#197: measured against lrc.red, lines started late and held notes ended early."""
+    def test_a_line_starts_where_its_voice_rose_but_never_far_or_into_the_line_above(self):
+        spf=0.02;vr=np.zeros(200);vr[40:]=1.0          # the voice rises at 0.80 s
+        self.assertAlmostEqual(T._rise(0.86,0.0,vr,0.5,spf),0.80,delta=0.021)
+        self.assertAlmostEqual(T._rise(1.00,1.00-T.LINE_RISE_MAX,vr,0.5,spf),0.90,delta=0.021)
+        self.assertAlmostEqual(T._rise(0.86,0.84,vr,0.5,spf),0.84,delta=0.021)
+        self.assertEqual(T._rise(0.86,0.0,np.zeros(200),0.5,spf),0.86)   # no voice: left alone
+
+    def test_the_reach_and_the_added_ending_stay_small(self):
+        self.assertLessEqual(T.LINE_RISE_MAX,0.10)
+        self.assertLessEqual(T.LAST_END_ADD,0.05)
+
+
 if __name__=='__main__':unittest.main()
