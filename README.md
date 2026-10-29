@@ -1,5 +1,9 @@
 # WordLyrics
 
+Version 1.6.6 starts each line where the singer actually comes in, and lets the last word of a line
+linger a little longer, so lines no longer start a beat late or end early. Measured against
+human-made word timing on 47 songs; songs are re-timed only when you ask.
+
 Version 1.6.5 uses far less memory: the voice model now works on one piece of the song at a time.
 Four pieces at once held about 7 GB more for the same speed; on an 8 GB graphics card that spilled
 into the computer's memory and a song could take minutes or never finish. Results are unchanged.
